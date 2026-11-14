@@ -57,8 +57,8 @@ PROFILES: Dict[str, ThresholdProfile] = {
 # ---------------------------------------------------------------------------
 UPLOAD_URL: str = "http://192.168.127.235:8080/api/events"
 DEVICE_ID: str = "box-01"
-DEVICE_LAT: float = 52.5200   # Where this box sits — set to your real location
-DEVICE_LON: float = 13.4050
+DEVICE_LAT: float = 60.15675541136981   # Where this box sits — set to your real location
+DEVICE_LON: float = 24.630079696276763
 
 # ---------------------------------------------------------------------------
 # Periodic analysis mode (python/analysis.py)

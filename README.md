@@ -13,50 +13,87 @@ We built a small bedside and window-sill box on the Arduino UNO Q that listens f
 
 ## Repository Layout
 
-- **`night-noise-box/`** — everything that goes on the UNO Q, as a self-contained Arduino App Lab app: `app.yaml`, `sketch/` (STM32 firmware + pinned `sketch.yaml` build profile), `python/` (Linux side), `assets/` (local web page). Copy it to the board with `night-noise-box/deploy.sh <board-ip>`, or open the folder directly in App Lab, then press **Run**.
-- **`server/`** — the Noise Map server; runs on your computer, not the board.
-- **`server/static/map/`** — the Otaniemi street-level noise map (MapLibre + OSM street propagation model, imported from `noise-maps-prototype`). See its own `README.md`.
+- **`night-noise-box/`** — everything that goes on the UNO Q, as a self-contained Arduino App Lab app: `app.yaml`, `sketch/` (STM32 firmware + pinned `sketch.yaml` build profile), `python/` (Linux side), `assets/` (local web page). See [Quick Start](#quick-start-run-the-server-and-flash-the-board).
+- **`server/`** — the Noise Map server (`server.py`); runs on your computer, not the board. Stores uploaded events in `noise_map.sqlite3` and serves `server/static/`.
+- **`server/static/`** — the Otaniemi street-level noise map (MapLibre + OSM street propagation model, no build step). See [`server/static/README.md`](server/static/README.md).
 
-## Noise Map Server (`server/`)
+## Quick Start: Run the Server and Flash the Board
 
-The box's Linux side POSTs each finished event as JSON to a map server (the STM32 has no network, so it reports over `Bridge` and `python/uploader.py` uploads on a background thread with retry/backoff — a down server never stalls the audio loop).
+Everything is Python 3 standard library on your computer — no `pip install` or `npm` needed.
+
+### 1. Start the Noise Map server (on your computer)
 
 ```bash
-python3 server/server.py                 # http://localhost:8080 — seeds simulated test boxes on first run
-python3 night-noise-box/python/main.py --source fake     # uploads to UPLOAD_URL (default http://localhost:8080/api/events)
+python3 server/server.py              # map at http://localhost:8080, uploads at /api/events
 ```
 
-- Set `UPLOAD_URL`, `DEVICE_ID`, `DEVICE_LAT`, `DEVICE_LON` in `python/config.py` (or `--upload-url` at startup). On the board, point `UPLOAD_URL` at the server machine's LAN IP.
-- Payload: `{"device_id", "lat", "lon", "events": [<event record>, ...]}`; records are upserted on `(device_id, id)` so a later "woke me" press updates the same event.
-- The map (Leaflet + OpenStreetMap tiles) draws a loudness-weighted heatmap; click anywhere to see the label breakdown and list of noises recorded there. Filter by label, time range, night hours, and toggle the simulated test data. `--no-seed` starts empty, `--reseed` regenerates test data, `--center lat,lon` moves it.
-- **Street-level map** at `http://localhost:8080/map/`: models noise along the real Otaniemi street network and corrects it with station readings. For now it runs on its built-in demo feed. It expects `GET /api/readings` (per-minute `v: 1` payloads, see `server/static/map/README.md`), which this server doesn't implement yet.
+- Listens on `0.0.0.0:8080` so boxes on the same LAN can reach it. Options: `--port <N>`, `--db <path>`, `--no-seed` (start empty), `--reseed` (regenerate simulated test events), `--center lat,lon` (where to place them).
+- Find your computer's LAN IP (`hostname -I` / `ip -4 addr`) — the board needs it in the next step.
+- **Current limitation:** the map page runs on its built-in demo feed (status chip says "Demo data"). It expects `GET /api/readings` (per-minute `v: 1` payloads, see `server/static/README.md`), which `server.py` doesn't implement yet. Box uploads are stored and can be checked with `curl http://localhost:8080/api/events?hours=24`.
+
+### 2. Configure the box (`night-noise-box/python/config.py`)
+
+App Lab starts `python/main.py` without CLI arguments, so on the board these come from `config.py`:
+
+```python
+UPLOAD_URL   = "http://<your-computer-lan-ip>:8080/api/events"   # "" = fully offline
+DEVICE_ID    = "box-01"                                           # unique per box
+DEVICE_LAT   = 60.1841                                            # where this box sits
+DEVICE_LON   = 24.8301
+AUDIO_SOURCE = "fake"                                             # keep "fake" until the live mic is verified
+```
+
+### 3. Wire the Modulinos
+
+Connect `ModulinoPixels`, `ModulinoButtons`, and `ModulinoMovement` (plus optional unused `ModulinoKnob`) to the UNO Q **Qwiic (`Wire1`)** port.
+
+### 4. Copy the app to the UNO Q and flash it
+
+```bash
+night-noise-box/deploy.sh <board-ip-or-hostname>      # optional 2nd arg: app folder name (default night-noise-box)
+```
+
+This copies the app over SSH as `arduino@<board>` into `/home/arduino/ArduinoApps/night-noise-box`, skipping local `*.sqlite3`, calibration files and `__pycache__`. Then in **Arduino App Lab**:
+
+1. Open the **Night-Noise Box** app (or open the `night-noise-box/` folder directly instead of using `deploy.sh`).
+2. Press **Run**. App Lab compiles `sketch/sketch.ino` with the pinned `sketch/sketch.yaml` profile (`arduino:zephyr:unoq`, library versions pinned there), flashes it to the STM32, and starts `python/main.py` on the Linux side. The `web_ui` brick and port `7000` are already declared in `app.yaml` — nothing to enable by hand.
+3. Open `http://<uno-q-ip>:7000` from a device on the same network for the box's local page.
+
+After any code or config change, re-run `deploy.sh` and press **Run** again.
+
+> `AUDIO_SOURCE = "live"` / `--source live` intentionally exits with a message pointing at `TODO(BOARD-CHECK)` in `python/audio.py` until the live microphone + Edge Impulse reader is verified (checklist step 6 below).
+
+### Run without a board (laptop dev mode)
+
+```bash
+python3 server/server.py                                    # terminal 1
+python3 night-noise-box/python/main.py --source fake        # terminal 2 → http://localhost:7000
+```
+
+`main.py` options: `--port <N>`, `--sim-buttons` (simulate "woke me" presses), `--upload-url <url>` (`''` disables upload), `--db <path>`.
+
+Self-tests:
+
+```bash
+python3 night-noise-box/python/audio.py --self-test
+python3 night-noise-box/python/sim_imu_replay.py
+python3 night-noise-box/python/store.py --self-test
+python3 night-noise-box/python/main.py --self-test
+```
+
+## Noise Map Server Details
+
+The STM32 has no network, so it reports over `Bridge`; `python/uploader.py` on the Linux side POSTs each finished event on a background thread with retry/backoff, so a down server never stalls the audio loop.
+
+- `POST /api/events` — `{"device_id", "lat", "lon", "events": [<event record>, ...]}`; records are upserted on `(device_id, id)` so a later "woke me" press updates the same event.
+- `GET /api/events?hours=N` — `{"events": [...], "devices": [...]}`.
+- Everything else is served from `server/static/` (the street-level map).
 
 ## Dependencies (One-Line Reasons)
 
-- **Python 3 standard library (`array`, `csv`, `json`, `math`, `sqlite3`, `http.server`, `threading`)** — Handles fixed-buffer RMS dBFS math, local SQLite storage, CSV export, and laptop dev serving with zero external packages.
+- **Python 3 standard library (`array`, `csv`, `json`, `math`, `sqlite3`, `http.server`, `threading`)** — Handles fixed-buffer RMS dBFS math, local SQLite storage, CSV export, the map server and laptop dev serving with zero external packages.
 - **`arduino-app-utils` & `arduino-app-bricks` (pre-installed in UNO Q App Lab)** — Provides `Bridge` RPC between Linux and the STM32 sketch and hosts `assets/index.html` over local Socket.IO via `WebUI`.
-
-## How to Run on a Laptop
-
-1. **Run the live web page against fake ~8 Hz input:**
-   ```bash
-   python3 night-noise-box/python/main.py --source fake
-   ```
-   Open `http://localhost:7000` in a browser (pass `--port <N>` to pick another port, or `--sim-buttons` to periodically simulate `"woke me"` presses).
-2. **Run deterministic unit and end-to-end self-tests:**
-   ```bash
-   python3 night-noise-box/python/audio.py --self-test
-   python3 night-noise-box/python/sim_imu_replay.py
-   python3 night-noise-box/python/store.py --self-test
-   python3 night-noise-box/python/main.py --self-test
-   ```
-
-## How to Run on the UNO Q Board with Fake Audio
-
-1. Connect `ModulinoPixels`, `ModulinoButtons`, and `ModulinoMovement` (plus optional unused `ModulinoKnob`) to the UNO Q **Qwiic (`Wire1`)** port.
-2. Open the `night-noise-box/` folder in **Arduino App Lab** (or copy it over with `night-noise-box/deploy.sh <board-ip>`) (`python/config.py` defaults to `AUDIO_SOURCE = "fake"`, so no files need editing for the initial board bring-up) and enable the **WebUI - HTML** brick on port `7000`.
-3. Click **Run** to flash `sketch/sketch.ino` and start `python/main.py`, then open `http://<uno-q-ip>:7000` on the same local Wi-Fi network.
-4. Note: Running `python3 night-noise-box/python/main.py --source live` intentionally exits with a clear message pointing to `TODO(BOARD-CHECK)` in `python/audio.py` until you drop in the verified live microphone + Edge Impulse reader from Step 6 below.
+- **MapLibre GL (CDN) + OpenFreeMap tiles** — Basemap for the street-level map; no API key.
 
 ## How to Switch Profiles & Calibrate
 

@@ -4,19 +4,27 @@
     python3 server/server.py              # http://localhost:8080
     python3 server/server.py --no-seed    # don't add simulated events to an empty database
 
+Settings come from environment variables, or from server/.env (not in git):
+
+    MONGODB_URI     store data in MongoDB (needs pymongo). Unset = local SQLite file.
+    MONGODB_DB      database name, default "noise_map"
+    NOISE_MAP_KEY   uploads must send "Authorization: Bearer <key>". Unset = anyone can upload.
+
     POST /api/readings   analysis payload from a box (analysis.py), stored as-is
     GET  /api/readings   ?since=<ISO time>  ->  {"payloads": [...]}   (read by the map)
     POST /api/events     {"device_id", "lat", "lon", "events": [...]} from events mode
     GET  /api/events     ?hours=N  ->  {"events": [...], "devices": [...]}
 
 Events are keyed on (device_id, event id), so re-sending an event after a
-"woke me" press updates it. Standard library only.
+"woke me" press updates it.
 """
 
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
+import os
 import random
 import sqlite3
 import threading
@@ -31,6 +39,18 @@ HERE = Path(__file__).resolve().parent
 STATIC_DIR = HERE / "static"
 LABELS = ("traffic", "construction", "music", "voices", "background", "unknown")
 MAX_BODY = 1_000_000
+
+
+def load_env_file(path: Path) -> None:
+    """Reads KEY=VALUE lines into os.environ. Variables already set win."""
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -71,7 +91,7 @@ def iso_utc(ts: str) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-class MapStore:
+class SqliteStore:
     def __init__(self, path: str) -> None:
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -200,7 +220,7 @@ HOTSPOTS = [
 ]
 
 
-def seed_test_data(store: MapStore, center_lat: float, center_lon: float, days: int = 7, seed: int = 7) -> int:
+def seed_test_data(store: Any, center_lat: float, center_lon: float, days: int = 7, seed: int = 7) -> int:
     rng = random.Random(seed)
     now = datetime.now()
     total = 0
@@ -240,7 +260,7 @@ def seed_test_data(store: MapStore, center_lat: float, center_lon: float, days: 
 
 
 # --- HTTP ---
-def make_handler(store: MapStore):
+def make_handler(store: Any, upload_key: str):
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
@@ -261,7 +281,7 @@ def make_handler(store: MapStore):
         def _cors(self) -> None:
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
         def do_OPTIONS(self) -> None:
             self.send_response(204)
@@ -291,6 +311,11 @@ def make_handler(store: MapStore):
             path = urlparse(self.path).path
             if path not in ("/api/events", "/api/readings"):
                 self._json(404, {"ok": False, "error": "not found"})
+                return
+            if upload_key and not hmac.compare_digest(
+                self.headers.get("Authorization", "").encode(), f"Bearer {upload_key}".encode()
+            ):
+                self._json(401, {"ok": False, "error": "missing or wrong key"})
                 return
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > MAX_BODY:
@@ -331,13 +356,27 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Noise Map server for Night-Noise Box uploads")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--db", default=str(HERE / "noise_map.sqlite3"))
+    ap.add_argument("--db", default=str(HERE / "noise_map.sqlite3"), help="SQLite file, when MONGODB_URI is unset")
     ap.add_argument("--center", default="52.5200,13.4050", help="lat,lon to place simulated test boxes around")
     ap.add_argument("--no-seed", action="store_true", help="Don't generate test data on an empty DB")
     ap.add_argument("--reseed", action="store_true", help="Regenerate simulated test data")
     args = ap.parse_args()
 
-    store = MapStore(args.db)
+    load_env_file(HERE / ".env")
+    uri = os.environ.get("MONGODB_URI", "")
+    if uri:
+        from mongo_store import MongoStore
+
+        db_name = os.environ.get("MONGODB_DB", "noise_map")
+        store: Any = MongoStore(uri, db_name)
+        print(f"[Noise Map] storing data in MongoDB, database {db_name!r}")
+    else:
+        store = SqliteStore(args.db)
+        print(f"[Noise Map] storing data in {args.db}")
+    upload_key = os.environ.get("NOISE_MAP_KEY", "")
+    if not upload_key:
+        print("[Noise Map] NOISE_MAP_KEY is not set: anyone can upload")
+
     c_lat, c_lon = (float(x) for x in args.center.split(","))
     if args.reseed:
         store.delete_simulated()
@@ -346,7 +385,7 @@ def main() -> None:
         print(f"[Noise Map] seeded {n} simulated events around {c_lat},{c_lon}")
 
     ThreadingHTTPServer.allow_reuse_address = True
-    srv = ThreadingHTTPServer((args.host, args.port), make_handler(store))
+    srv = ThreadingHTTPServer((args.host, args.port), make_handler(store, upload_key))
     print(f"[Noise Map] map at http://localhost:{args.port}, boxes upload to http://<this computer's IP>:{args.port}/api/readings")
     try:
         srv.serve_forever()

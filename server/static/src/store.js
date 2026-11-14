@@ -21,9 +21,14 @@ NM.store = (function () {
         rejected++;
         continue;
       }
-      if (!NM.data.stations.some((s) => s.id === p.station_id) && !unknownWarned.has(p.station_id)) {
+      const known = NM.data.stations.some((s) => s.id === p.station_id);
+      const placed = !NM.api.isDemo && NM.data.addStation(p.station_id, Number(p.lat), Number(p.lon));
+      if (!known && !placed && !unknownWarned.has(p.station_id)) {
         unknownWarned.add(p.station_id);
-        console.warn(`[noise-map] Readings from unregistered station "${p.station_id}" — add it to NM.data.stations to place it on the map.`);
+        console.warn(
+          `[noise-map] Station "${p.station_id}" sent no valid lat/lon (${p.lat},${p.lon}) — ` +
+          `set DEVICE_LAT / DEVICE_LON in night-noise-box/python/config.py.`
+        );
       }
       let map = stations.get(p.station_id);
       if (!map) stations.set(p.station_id, (map = new Map()));
@@ -48,8 +53,10 @@ NM.store = (function () {
 
   /** Aggregate a list of [t, reading] into one window summary (or null). */
   function aggregate(entries) {
-    const min = NM.config.minValidSeconds;
-    const ok = entries.filter(([, r]) => weight(r) >= min);
+    // minValidSeconds is per 60 s; scale it for shorter readings (duration_s, e.g. 10 s).
+    const min = NM.config.minValidSeconds / 60;
+    const len = (r) => (Number.isFinite(r.duration_s) && r.duration_s > 0 ? r.duration_s : 60);
+    const ok = entries.filter(([, r]) => weight(r) >= min * len(r));
     if (!ok.length) return null;
     let eSum = 0, wSum = 0, lmax = -Infinity;
     const src = {}, l90s = [], flags = new Set();

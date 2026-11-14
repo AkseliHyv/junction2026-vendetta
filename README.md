@@ -15,7 +15,7 @@ We built a small bedside and window-sill box on the Arduino UNO Q that listens f
 
 - **`night-noise-box/`** — everything that goes on the UNO Q, as a self-contained Arduino App Lab app: `app.yaml`, `sketch/` (STM32 firmware + pinned `sketch.yaml` build profile), `python/` (Linux side), `assets/` (local web page). See [Quick Start](#quick-start-run-the-server-and-flash-the-board).
 - **`server/`** — the Noise Map server (`server.py`); runs on your computer, not the board. Stores uploaded events in `noise_map.sqlite3` and serves `server/static/`.
-- **`server/static/`** — the Otaniemi street-level noise map (MapLibre + OSM street propagation model, no build step). See [`server/static/README.md`](server/static/README.md).
+- **`server/static/`** — the noise world map (MapLibre; live box readings anywhere, plus an OSM street propagation model for Otaniemi; no build step). See [`server/static/README.md`](server/static/README.md).
 
 ## Quick Start: Run the Server and Flash the Board
 
@@ -29,7 +29,7 @@ python3 server/server.py              # map at http://localhost:8080, uploads at
 
 - Listens on `0.0.0.0:8080` so boxes on the same LAN can reach it. Options: `--port <N>`, `--db <path>`, `--no-seed` (start empty), `--reseed` (regenerate simulated test events), `--center lat,lon` (where to place them).
 - Find your computer's LAN IP (`hostname -I` / `ip -4 addr`) — the board needs it in the next step.
-- **Current limitation:** the map page runs on its built-in demo feed (status chip says "Demo data"). It expects `GET /api/readings` (per-minute `v: 1` payloads, see `server/static/README.md`), which `server.py` doesn't implement yet. Box uploads are stored and can be checked with `curl http://localhost:8080/api/events?hours=24`.
+- The map at `http://localhost:8080` is a world map of the boxes' live readings from `/api/readings`; each box appears at its `DEVICE_LAT`/`DEVICE_LON`. Around Otaniemi it also shows the street-level noise estimate. Open `http://localhost:8080/?demo` for the built-in demo feed.
 
 ### 2. Configure the box (`night-noise-box/python/config.py`)
 
@@ -83,10 +83,10 @@ python3 night-noise-box/python/analysis.py --self-test
 Until the Edge Impulse model is dropped into `night-noise-box/models/` (see
 `models/README.md`), loudness is measured for real, `sources` is empty and readings are flagged
 `no_model`. The server stores payloads unchanged and serves them at
-`GET /api/readings?since=…`; open the map with `?api=/api` to read them instead of the demo feed.
-The map only shows stations listed in `server/static/src/data.js` (add `DEVICE_ID` there), and by
-default it ignores readings with `valid_s < 20` (`minValidSeconds`). Lower that setting while
-analyses are 10 s long.
+`GET /api/readings?since=…`; the map reads them by default (`?demo` shows the demo feed instead).
+Each box appears on the map at the `lat`/`lon` it sends (`DEVICE_LAT`/`DEVICE_LON`), with no
+registration needed. The valid-audio minimum (`minValidSeconds`, per 60 s) scales with each reading's
+`duration_s`, so 10 s readings work as-is.
 
 ### Run without a board (laptop dev mode)
 

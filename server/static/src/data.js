@@ -116,8 +116,9 @@ NM.data = (function () {
 
   // Measuring stations (Arduino UNO Q devices). `id` must match the device's
   // `station_id`; lat/lon is where the device is mounted.
-  // These are placeholder positions for the demo: replace them with the real ones.
-  const stations = [
+  // With a backend, stations are added from the lat/lon in each device's
+  // payload (see addStation). The list below is only used by the demo feed.
+  const demoStations = [
     { id: 'otaniemi-01', name: 'Otakaari', lat: 60.18676, lon: 24.82742 },
     { id: 'otaniemi-02', name: 'Alvar Aalto Park', lat: 60.18498, lon: 24.82893 },
     { id: 'otaniemi-03', name: 'Kehä I at Otaniemi', lat: 60.18257, lon: 24.81556 },
@@ -126,9 +127,23 @@ NM.data = (function () {
     { id: 'otaniemi-06', name: 'Otaranta shore', lat: 60.184, lon: 24.8364 },
     { id: 'otaniemi-07', name: 'Teekkari Village', lat: 60.18907, lon: 24.83822 },
     { id: 'otaniemi-08', name: 'Maarintie', lat: 60.18702, lon: 24.81394 },
-  ].map((s) => ({ ...s, ...G.toWorld(s.lon, s.lat) }));
+  ].map((s) => ({ ...s, ...G.toWorld(s.lon, s.lat), inArea: true }));
+  const stations = NM.config.apiBase ? [] : demoStations;
+  // The street noise model only covers `area`; stations elsewhere are shown on
+  // the world map with their own measurements only.
+  const inArea = (lon, lat) => lon >= area.west && lon <= area.east && lat >= area.south && lat <= area.north;
 
-  return { area, initialView, world, profiles, roadClasses, roads, places, stations };
+  /** Register (or move) a live station from a device payload. False if it has no usable position. */
+  function addStation(id, lat, lon) {
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return false;
+    const st = { id, name: id, lat, lon, ...G.toWorld(lon, lat), inArea: inArea(lon, lat) };
+    const i = stations.findIndex((s) => s.id === id);
+    if (i >= 0) stations[i] = { ...stations[i], ...st, name: stations[i].name };
+    else stations.push(st);
+    return true;
+  }
+
+  return { area, initialView, world, profiles, roadClasses, roads, places, stations, addStation, inArea };
 })();
 
 /* Noise categories, shared by the map sheet and the meter. */

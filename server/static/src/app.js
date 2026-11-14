@@ -64,7 +64,8 @@
     liveStations = all.filter((s) => s.stats && s.stats.ok && !s.stats.stale);
     const t = liveStations.length ? Math.max(...liveStations.map((s) => s.stats.end)) : now;
 
-    NM.field.update(liveStations.map((s) => ({ x: s.x, y: s.y, laeq: s.stats.laeq })), t);
+    const local = liveStations.filter((s) => s.inArea); // only these correct the street model
+    NM.field.update(local.map((s) => ({ x: s.x, y: s.y, laeq: s.stats.laeq })), t);
     NM.map.refresh(
       all.filter((s) => s.stats && s.stats.ok).map((s) => ({ id: s.id, x: s.x, y: s.y, db: s.stats.laeq, stale: s.stats.stale }))
     );
@@ -106,14 +107,8 @@
       (pos) => {
         const p = NM.geo.toWorld(pos.coords.longitude, pos.coords.latitude);
         const W = D.world;
-        if (p.x < W.x0 || p.x > W.x1 || p.y < W.y0 || p.y > W.y1) {
-          userPos = null;
-          NM.map.setUser(null);
-          flash('You are outside the mapped area');
-          NM.map.showArea();
-          return;
-        }
-        userPos = p;
+        // Outside the street model the marker is still shown; street search just ignores the position.
+        userPos = p.x < W.x0 || p.x > W.x1 || p.y < W.y0 || p.y > W.y1 ? null : p;
         NM.map.setUser(p);
         NM.map.reveal(p.x, p.y, 0, { force: true, zoom: 16 });
       },
@@ -124,10 +119,11 @@
 
   // ---- Selection -----------------------------------------------------------------
   function stationsHourly() {
-    return liveStations.map((s) => ({ x: s.x, y: s.y, hours: NM.store.hourly(s.id) }));
+    return liveStations.filter((s) => s.inArea).map((s) => ({ x: s.x, y: s.y, hours: NM.store.hourly(s.id) }));
   }
 
   function openHit(hit, opts = {}) {
+    if (!hit) return;
     selected = hit;
     const now = Date.now();
     const nowHour = T.hm(now).h;

@@ -16,14 +16,13 @@ NM.map = (function () {
   // ---- Setup -------------------------------------------------------------------
   function init(el, opts = {}) {
     onTap = opts.onTap || onTap;
-    const A = D.area, V = D.initialView;
-    const pad = 0.01; // let the edge of the area (where the overlay fades out) be seen
+    const V = D.initialView;
     map = new maplibregl.Map({
       container: el,
       style: NM.config.mapStyle,
       bounds: [[V.west, V.south], [V.east, V.north]],
-      maxBounds: [[A.west - pad * 2, A.south - pad], [A.east + pad * 2, A.north + pad]],
-      minZoom: 12,
+      minZoom: 1,
+      renderWorldCopies: false,
       maxZoom: 18.5,
       dragRotate: false,
       pitchWithRotate: false,
@@ -81,10 +80,22 @@ NM.map = (function () {
     }, before);
 
     map.addSource('stations', { type: 'geojson', data: stationsGeoJSON() });
+    // World view: a heat glow around each live station, fading out as the street model takes over.
+    map.addLayer({
+      id: 'stations-heat', type: 'heatmap', source: 'stations', maxzoom: 14, filter: ['!', ['get', 'stale']],
+      paint: {
+        'heatmap-weight': ['interpolate', ['linear'], ['get', 'db'], 35, 0.1, 80, 1],
+        'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 1, 1, 13, 2],
+        'heatmap-radius': ['interpolate', ['exponential', 2], ['zoom'], 1, 12, 8, 30, 13, 70],
+        'heatmap-opacity': ['interpolate', ['linear'], ['zoom'], 11, 0.85, 14, 0],
+        'heatmap-color': ['interpolate', ['linear'], ['heatmap-density'],
+          0, 'rgba(0,0,0,0)', 0.15, 'rgba(116,87,224,0.5)', 0.4, '#b453cc', 0.65, '#e8526c', 0.85, '#ff9f45', 1, '#ffd36a'],
+      },
+    }, before);
     map.addLayer({
       id: 'stations-ring', type: 'circle', source: 'stations',
       paint: {
-        'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 3.5, 16, 5.5],
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 1, 5, 12, 4, 16, 5.5],
         'circle-color': 'rgba(11,13,18,0.75)',
         'circle-stroke-width': 1.3,
         'circle-stroke-color': ['case', ['get', 'stale'], 'rgba(150,150,160,0.5)', 'rgba(255,255,255,0.7)'],
@@ -93,7 +104,7 @@ NM.map = (function () {
     map.addLayer({
       id: 'stations-dot', type: 'circle', source: 'stations',
       paint: {
-        'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 1.5, 16, 2.4],
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 1, 3, 12, 2, 16, 2.4],
         'circle-color': ['get', 'color'],
       },
     });
@@ -114,6 +125,20 @@ NM.map = (function () {
     map.getSource('noise').updateImage({ url: NM.field.canvas.toDataURL(), coordinates: NM.field.corners() });
     map.getSource('roads').setData(roadsGeoJSON());
     map.getSource('stations').setData(stationsGeoJSON());
+    fitStationsOnce();
+  }
+
+  /** On the first data, zoom out to show every station if some are outside the start view. */
+  let fitted = false;
+  function fitStationsOnce() {
+    if (fitted || !state.stations.length) return;
+    fitted = true;
+    const V = D.initialView;
+    const pts = state.stations.map((s) => ll(s.x, s.y));
+    if (pts.every(([lon, lat]) => lon >= V.west && lon <= V.east && lat >= V.south && lat <= V.north)) return;
+    const b = new maplibregl.LngLatBounds(pts[0], pts[0]);
+    pts.forEach((p) => b.extend(p));
+    map.fitBounds(b, { padding: 100, maxZoom: 13, duration: 0 });
   }
 
   /** A street's level: the 60th percentile of the field sampled every ~20 m along it. */
@@ -152,7 +177,7 @@ NM.map = (function () {
       features: state.stations.map((s) => ({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: ll(s.x, s.y) },
-        properties: { id: s.id, stale: !!s.stale, color: s.stale ? '#6b6d75' : NM.category(s.db).color },
+        properties: { id: s.id, db: s.db, stale: !!s.stale, color: s.stale ? '#6b6d75' : NM.category(s.db).color },
       })),
     };
   }
@@ -208,6 +233,7 @@ NM.map = (function () {
         if (best) return { type: 'station', id: best.st.id, x: best.st.x, y: best.st.y };
       }
     }
+    if (!D.inArea(lngLat.lng, lngLat.lat)) return null; // no street model out here; only stations are tappable
     const p = G.toWorld(lngLat.lng, lngLat.lat);
     const mpp = metresPerPixel(), reach = 16 * mpp;
     let best = null;

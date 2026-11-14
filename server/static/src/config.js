@@ -25,6 +25,7 @@ NM.config = Object.assign(
 );
 
 (function () {
-  const api = new URLSearchParams(location.search).get('api');
-  if (api) NM.config.apiBase = api;
+  const q = new URLSearchParams(location.search);
+  if (q.get('api')) NM.config.apiBase = q.get('api');
+  if (q.has('demo')) NM.config.apiBase = null;
 })();

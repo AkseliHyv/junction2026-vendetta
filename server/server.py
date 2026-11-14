@@ -174,10 +174,11 @@ class MapStore:
         if since:
             sql += " WHERE last_ts > ?"
             args = (iso_utc(since),)
-        sql += " ORDER BY last_ts LIMIT 5000"
+        # Newest first, so when there are more than the limit the map still gets current data.
+        sql += " ORDER BY last_ts DESC LIMIT 5000"
         with self._lock:
             rows = self._conn.execute(sql, args).fetchall()
-        return [json.loads(r["payload"]) for r in rows]
+        return [json.loads(r["payload"]) for r in reversed(rows)]
 
     def count(self) -> int:
         with self._lock:

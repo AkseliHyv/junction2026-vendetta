@@ -106,6 +106,14 @@ python3 night-noise-box/python/analysis.py --mic synthetic \
 The synthetic mic plays a quiet hiss with a tone every few seconds. Change
 `DEVICE_LAT`/`DEVICE_LON` in `config.py` to move the box on the map.
 
+To fill the map with 36 simulated boxes around Helsinki and Espoo (or
+thousands, for load testing), see [mock-devices/README.md](mock-devices/README.md):
+
+```bash
+python3 server/server.py --no-seed --db /tmp/noise_map_mock.sqlite3
+python3 mock-devices/mock_fleet.py --backfill-hours 24
+```
+
 Self-tests, none of which need hardware:
 
 ```bash
@@ -160,6 +168,7 @@ night-noise-box/          the App Lab app that runs on the board
     sim_imu_replay.py     Python copy of the sketch, for testing without a board
   assets/                 the local page (events mode)
   models/                 the Edge Impulse model
+mock-devices/             simulated boxes that upload like real ones (load testing)
 server/
   server.py               receives uploads and serves the map
   static/                 the map (see static/README.md)

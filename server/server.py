@@ -12,6 +12,9 @@ Settings come from environment variables, or from server/.env (not in git):
 
     POST /api/readings   analysis payload from a box (analysis.py), stored as-is
     GET  /api/readings   ?since=<ISO time>  ->  {"payloads": [...]}   (read by the map)
+                         Readings come back summarised per station: 5-minute windows for
+                         the last hour, hourly before that. &raw=1 returns the payloads
+                         as the boxes sent them (newest 5000).
     POST /api/events     {"device_id", "lat", "lon", "events": [...]} from events mode
     GET  /api/events     ?hours=N  ->  {"events": [...], "devices": [...]}
 
@@ -22,8 +25,10 @@ Events are keyed on (device_id, event id), so re-sending an event after a
 from __future__ import annotations
 
 import argparse
+import gzip
 import hmac
 import json
+import math
 import os
 import random
 import sqlite3
@@ -32,8 +37,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
+
+from summaries import AGG_KEEP_DAYS, contributions, iso_utc, summary_payloads, summary_plan
 
 HERE = Path(__file__).resolve().parent
 STATIC_DIR = HERE / "static"
@@ -80,23 +87,93 @@ CREATE TABLE IF NOT EXISTS readings (
     PRIMARY KEY (station_id, first_ts)
 );
 CREATE INDEX IF NOT EXISTS idx_readings_last ON readings(last_ts);
+-- Per-station summaries for the map. Sums are weighted by valid_s, so readings
+-- of any length combine like the map does it (energy average for LAeq).
+CREATE TABLE IF NOT EXISTS agg (
+    res         INTEGER NOT NULL,       -- window length, s
+    station_id  TEXT    NOT NULL,
+    start_ts    TEXT    NOT NULL,       -- window start (UTC ISO)
+    lat         REAL,
+    lon         REAL,
+    duration_s  REAL    NOT NULL,
+    valid_s     REAL    NOT NULL,
+    e_sum       REAL    NOT NULL,       -- sum of valid_s * 10^(laeq/10)
+    l90_sum     REAL    NOT NULL,       -- sum of valid_s * l90
+    lmax        REAL,
+    src         TEXT    NOT NULL,       -- {label: sum of valid_s * score}
+    flags       TEXT    NOT NULL,       -- {flag: count}
+    n           INTEGER NOT NULL,
+    PRIMARY KEY (res, station_id, start_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_agg_start ON agg(res, start_ts);
 """
-
-
-def iso_utc(ts: str) -> str:
-    """Any ISO timestamp as UTC "YYYY-MM-DDTHH:MM:SS.mmmZ", so strings sort by time."""
-    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 class SqliteStore:
     def __init__(self, path: str) -> None:
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(SCHEMA)
         self._lock = threading.Lock()
+        self._inserts = 0
+        self.raw_hours: Optional[float] = None
+        if self._conn.execute("SELECT 1 FROM agg LIMIT 1").fetchone() is None:
+            self._rebuild_agg()
+
+    def _rebuild_agg(self) -> None:
+        """Summaries for readings stored before the agg table existed."""
+        n = 0
+        with self._lock:
+            for row in self._conn.execute("SELECT payload FROM readings ORDER BY first_ts").fetchall():
+                p = json.loads(row["payload"])
+                self._apply(str(p.get("station_id"))[:64], p.get("lat"), p.get("lon"), contributions(p), 1)
+                n += 1
+            self._conn.commit()
+        if n:
+            print(f"[Noise Map] summarised {n} stored payloads")
+
+    def _apply(self, station: str, lat: Any, lon: Any, contrib: Dict[Tuple[int, str], Dict[str, Any]], sign: int) -> None:
+        """Add (sign=1) or take back (sign=-1) a payload's contribution. Caller holds the lock."""
+        lat = float(lat) if isinstance(lat, (int, float)) else None
+        lon = float(lon) if isinstance(lon, (int, float)) else None
+        for (res, start), c in contrib.items():
+            old = self._conn.execute(
+                "SELECT * FROM agg WHERE res=? AND station_id=? AND start_ts=?", (res, station, start)).fetchone()
+            if old is None:
+                if sign < 0:
+                    continue
+                src, flags, vals = c["src"], c["flags"], c
+                lmax = c["lmax"]
+            else:
+                src, flags = json.loads(old["src"]), json.loads(old["flags"])
+                for k, v in c["src"].items():
+                    src[k] = max(0.0, src.get(k, 0.0) + sign * v)
+                for k, v in c["flags"].items():
+                    flags[k] = flags.get(k, 0) + sign * v
+                    if flags[k] <= 0:
+                        del flags[k]
+                vals = {k: max(0.0, old[k] + sign * c[k]) for k in ("duration_s", "valid_s", "e_sum", "l90_sum", "n")}
+                lmax = old["lmax"] if sign < 0 or c["lmax"] is None else max(old["lmax"] or -math.inf, c["lmax"])
+            self._conn.execute(
+                """INSERT OR REPLACE INTO agg (res, station_id, start_ts, lat, lon, duration_s, valid_s, e_sum,
+                                               l90_sum, lmax, src, flags, n)
+                   VALUES (?, ?, ?, COALESCE(?, (SELECT lat FROM agg WHERE res=? AND station_id=? AND start_ts=?)),
+                           COALESCE(?, (SELECT lon FROM agg WHERE res=? AND station_id=? AND start_ts=?)),
+                           ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (res, station, start, lat, res, station, start, lon, res, station, start,
+                 vals["duration_s"], vals["valid_s"], vals["e_sum"], vals["l90_sum"], lmax,
+                 json.dumps(src), json.dumps(flags), int(vals["n"])),
+            )
+
+    def _prune(self) -> None:
+        """Caller holds the lock."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=AGG_KEEP_DAYS)
+        self._conn.execute("DELETE FROM agg WHERE start_ts < ?", (cutoff.strftime("%Y-%m-%dT%H:%M:%S.000Z"),))
+        if self.raw_hours:
+            raw_cut = datetime.now(timezone.utc) - timedelta(hours=self.raw_hours)
+            self._conn.execute("DELETE FROM readings WHERE last_ts < ?", (raw_cut.strftime("%Y-%m-%dT%H:%M:%S.000Z"),))
 
     def upsert(self, device_id: str, lat: float, lon: float, events: List[Dict[str, Any]], simulated: bool = False) -> int:
         rows = []
@@ -179,6 +256,12 @@ class SqliteStore:
             raise ValueError("readings must be a non-empty list")
         stamps = sorted(iso_utc(str(r["minute"])) for r in readings)
         with self._lock:
+            old = self._conn.execute(
+                "SELECT payload FROM readings WHERE station_id=? AND first_ts=?", (station, stamps[0])).fetchone()
+            if old is not None:  # a re-send replaces the earlier copy in the summaries too
+                op = json.loads(old["payload"])
+                self._apply(station, None, None, contributions(op), -1)
+            self._apply(station, payload.get("lat"), payload.get("lon"), contributions(payload), 1)
             self._conn.execute(
                 """INSERT INTO readings (station_id, first_ts, last_ts, payload, received_at)
                    VALUES (?, ?, ?, ?, ?)
@@ -186,18 +269,36 @@ class SqliteStore:
                        last_ts=excluded.last_ts, payload=excluded.payload, received_at=excluded.received_at""",
                 (station, stamps[0], stamps[-1], json.dumps(payload), time.time()),
             )
+            self._inserts += 1
+            if self._inserts % 2000 == 0:
+                self._prune()
             self._conn.commit()
         return len(readings)
+
+    def summaries_since(self, since: Optional[str]) -> List[Dict[str, Any]]:
+        """Summarised payloads for the map; see summaries.summary_plan()."""
+        since_dt, plan = summary_plan(since)
+        rows: List[Dict[str, Any]] = []
+        with self._lock:
+            for res, lo_ts, hi_ts in plan:
+                for r in self._conn.execute(
+                        "SELECT * FROM agg WHERE res=? AND start_ts>? AND start_ts<? ORDER BY start_ts",
+                        (res, lo_ts, hi_ts)):
+                    row = dict(r)
+                    row["src"], row["flags"] = json.loads(row["src"]), json.loads(row["flags"])
+                    rows.append(row)
+        return summary_payloads(rows, since_dt)
 
     def readings_since(self, since: Optional[str]) -> List[Dict[str, Any]]:
         sql, args = "SELECT payload FROM readings", ()
         if since:
             sql += " WHERE last_ts > ?"
             args = (iso_utc(since),)
-        sql += " ORDER BY last_ts LIMIT 5000"
+        # Newest first, so when there are more than the limit the map still gets current data.
+        sql += " ORDER BY last_ts DESC LIMIT 5000"
         with self._lock:
             rows = self._conn.execute(sql, args).fetchall()
-        return [json.loads(r["payload"]) for r in rows]
+        return [json.loads(r["payload"]) for r in reversed(rows)]
 
     def count(self) -> int:
         with self._lock:
@@ -260,7 +361,7 @@ def seed_test_data(store: Any, center_lat: float, center_lon: float, days: int =
 
 
 # --- HTTP ---
-def make_handler(store: Any, upload_key: str):
+def make_handler(store: Any, upload_key: str, quiet: bool = False):
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
@@ -269,9 +370,14 @@ def make_handler(store: Any, upload_key: str):
             return  # only uploads are logged, in do_POST
 
         def _json(self, code: int, obj: Any) -> None:
-            body = json.dumps(obj).encode("utf-8")
+            body = json.dumps(obj, separators=(",", ":")).encode("utf-8")
+            gz = len(body) > 4096 and "gzip" in self.headers.get("Accept-Encoding", "")
+            if gz:
+                body = gzip.compress(body, compresslevel=5)
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
+            if gz:
+                self.send_header("Content-Encoding", "gzip")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self._cors()
@@ -299,9 +405,13 @@ def make_handler(store: Any, upload_key: str):
                 self._json(200, store.query(hours))
                 return
             if url.path == "/api/readings":
-                since = parse_qs(url.query).get("since", [None])[0]
+                qs = parse_qs(url.query)
+                since = qs.get("since", [None])[0]
                 try:
-                    self._json(200, {"payloads": store.readings_since(since)})
+                    if qs.get("raw", ["0"])[0] in ("1", "true"):
+                        self._json(200, {"payloads": store.readings_since(since)})
+                    else:
+                        self._json(200, {"payloads": store.summaries_since(since)})
                 except ValueError as exc:
                     self._json(400, {"ok": False, "error": f"bad since: {exc}"})
                 return
@@ -330,6 +440,9 @@ def make_handler(store: Any, upload_key: str):
                     self._json(400, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
                     return
                 r = body["readings"][-1]
+                if quiet:
+                    self._json(200, {"ok": True, "stored": n})
+                    return
                 print(f"[Noise Map] analysis from {body['station_id']}: {n} reading(s), "
                       f"LAeq {r.get('laeq_db')} dB, sources {r.get('sources')} {r.get('flags') or ''}", flush=True)
                 self._json(200, {"ok": True, "stored": n})
@@ -361,6 +474,9 @@ def main() -> None:
     ap.add_argument("--center", default="52.5200,13.4050", help="lat,lon to place simulated test boxes around")
     ap.add_argument("--no-seed", action="store_true", help="Don't generate test data on an empty DB")
     ap.add_argument("--reseed", action="store_true", help="Regenerate simulated test data")
+    ap.add_argument("--raw-hours", type=float, default=0,
+                    help="delete payloads older than this many hours (summaries stay %d days; 0 = keep all)" % AGG_KEEP_DAYS)
+    ap.add_argument("--quiet", action="store_true", help="don't print a line per upload (for big mock fleets)")
     args = ap.parse_args()
 
     load_env_file(HERE / ".env")
@@ -374,10 +490,10 @@ def main() -> None:
     else:
         store = SqliteStore(args.db)
         print(f"[Noise Map] storing data in {args.db}")
+    store.raw_hours = args.raw_hours or None
     upload_key = os.environ.get("NOISE_MAP_KEY", "")
     if not upload_key:
         print("[Noise Map] NOISE_MAP_KEY is not set: anyone can upload")
-
     c_lat, c_lon = (float(x) for x in args.center.split(","))
     if args.reseed:
         store.delete_simulated()
@@ -386,7 +502,9 @@ def main() -> None:
         print(f"[Noise Map] seeded {n} simulated events around {c_lat},{c_lon}")
 
     ThreadingHTTPServer.allow_reuse_address = True
-    srv = ThreadingHTTPServer((args.host, args.port), make_handler(store, upload_key))
+    ThreadingHTTPServer.request_queue_size = 256  # bursts of uploads from big fleets
+    ThreadingHTTPServer.daemon_threads = True
+    srv = ThreadingHTTPServer((args.host, args.port), make_handler(store, upload_key, args.quiet))
     print(f"[Noise Map] map at http://localhost:{args.port}, boxes upload to http://<this computer's IP>:{args.port}/api/readings")
     try:
         srv.serve_forever()

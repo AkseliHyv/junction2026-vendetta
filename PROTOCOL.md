@@ -10,8 +10,13 @@ If the server has `NOISE_MAP_KEY` set, every POST must send
 
 ### Analysis payload (analysis mode)
 
-`POST /api/readings`, one per analysis. The server stores it as-is and the map
-reads it back from `GET /api/readings?since=<ISO time>`.
+`POST /api/readings`, one per analysis. The server stores it as-is and keeps
+per-station summaries (5-minute and hourly windows). The map reads the
+summaries back from `GET /api/readings?since=<ISO time>`, in the same format
+with one reading per window (`duration_s` is the window's total, plus `n`, the
+number of readings in it). `&raw=1` returns the stored payloads instead
+(newest 5000). Re-sending a payload with the same first `minute` replaces it,
+in the summaries too.
 
 ```json
 {

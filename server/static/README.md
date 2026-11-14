@@ -28,7 +28,7 @@ Open `http://localhost:8080/?demo` to see it with made-up data from 8 stations i
 GET {apiBase}/readings?since=2026-11-14T12:30:00.000Z
 ```
 
-It returns every stored payload with readings newer than `since`, exactly as the box sent it, either as a bare array or as `{ "payloads": [...] }`:
+It returns payloads with readings newer than `since`, either as a bare array or as `{ "payloads": [...] }`. `server.py` sends one payload per station whose readings are summaries: one per 5-minute window from the start of the hour an hour ago, one per hour before that (`duration_s` is the window's total). The map aggregates them like any other readings, and a day of 3000 stations stays around 100k readings. With `&raw=1` it returns the payloads exactly as the boxes sent them:
 
 ```json
 [

@@ -1,0 +1,6 @@
+{
+  "name": "Kinesthesia — UNO Q Movement-to-Music Instrument",
+  "description": "Care home and rehabilitation movement-to-music instrument built for Arduino UNO Q (STM32 Modulino IMU + Linux Pose + Web Audio Synth) with guided seated exercises.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

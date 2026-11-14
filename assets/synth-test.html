@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kinesthesia — Standalone Synth Keyboard Test (No Board)</title>
+  <style>
+    :root {
+      --bg: #FAF8F5;
+      --surface: #FFFFFF;
+      --ink: #1C1917;
+      --muted: #57534E;
+      --border: #E7E5E4;
+      --teal: #0F766E;
+      --amber: #D97706;
+      --sky: #0284C7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 32px 24px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      max-width: 960px;
+      margin-inline: auto;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 28px;
+      gap: 16px;
+    }
+    h1 { margin: 0; font-size: 1.5rem; letter-spacing: -0.02em; }
+    .meta { color: var(--muted); font-size: 0.9rem; margin-top: 4px; }
+    button.primary {
+      background: var(--teal);
+      color: #fff;
+      border: none;
+      padding: 12px 22px;
+      border-radius: 10px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: var(--surface);
+      color: var(--ink);
+      border: 1px solid var(--border);
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 0.92rem;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+      gap: 12px;
+      margin: 20px 0 28px;
+    }
+    .pad {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px 12px;
+      text-align: center;
+      cursor: pointer;
+      transition: transform 120ms ease, border-color 120ms ease;
+    }
+    .pad:active, .pad.active {
+      transform: translateY(2px);
+      border-color: var(--teal);
+    }
+    .pad .key { font-size: 0.8rem; color: var(--muted); display: block; margin-bottom: 6px; }
+    .pad .note { font-size: 1.35rem; font-weight: 700; display: block; }
+    .section-label { font-weight: 600; font-size: 1rem; margin-bottom: 6px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; }
+    #log {
+      margin-top: 24px;
+      padding: 14px 16px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Kinesthesia Web Audio Synth Test</h1>
+      <div class="meta">Offline standalone verification · No Arduino UNO Q required · Zero CDN dependencies</div>
+    </div>
+    <button id="start-btn" class="primary" type="button">Start Audio</button>
+  </header>
+
+  <main>
+    <div class="section-label">Voice 0 — Left Arm Marimba (Keys: A S D F G H J K)</div>
+    <div class="grid" id="voice0-grid"></div>
+
+    <div class="section-label">Voice 1 — Right Arm Celesta Bell (Keys: Q W E R T Y U I)</div>
+    <div class="grid" id="voice1-grid"></div>
+
+    <div class="actions">
+      <button id="reward-btn" class="secondary" type="button">Play Step Reward Phrase</button>
+      <button id="melody-btn" class="secondary" type="button">Play Session Complete Melody</button>
+    </div>
+
+    <div id="log" role="status" aria-live="polite">Click "Start Audio", then press keys A–K or Q–I to verify synthesis latency.</div>
+  </main>
+
+  <script src="./synth.js"></script>
+  <script>
+    (function () {
+      var synth = new window.KinesthesiaSynth();
+      var startBtn = document.getElementById('start-btn');
+      var logEl = document.getElementById('log');
+      var keysV0 = ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K'];
+      var keysV1 = ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I'];
+      var notes = window.KinesthesiaSynth.PENTATONIC_MIDI;
+      var keyMap = {};
+
+      function ensureStarted() {
+        if (synth.ready) return Promise.resolve(true);
+        return synth.start().then(function () {
+          startBtn.textContent = 'Audio Ready';
+          logEl.textContent = 'Web Audio context running (' + Math.round(synth.ctx.baseLatency * 1000 || 4) + ' ms base latency).';
+        });
+      }
+
+      startBtn.addEventListener('click', ensureStarted);
+
+      function buildPads(containerId, keyList, voice) {
+        var root = document.getElementById(containerId);
+        notes.forEach(function (midi, idx) {
+          var keyChar = keyList[idx];
+          var btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'pad';
+          btn.innerHTML = '<span class="key">Key ' + keyChar + '</span><span class="note">' + window.KinesthesiaSynth.midiToName(midi) + '</span>';
+          var trigger = function () {
+            var t0 = performance.now();
+            ensureStarted().then(function () {
+              synth.noteOn(midi, 0.78, voice);
+              var dt = (performance.now() - t0).toFixed(2);
+              logEl.textContent = 'Played ' + window.KinesthesiaSynth.midiToName(midi) + ' (MIDI ' + midi + ', voice ' + voice + ') — schedule time ' + dt + ' ms';
+              btn.classList.add('active');
+              setTimeout(function () { btn.classList.remove('active'); }, 150);
+            });
+          };
+          btn.addEventListener('click', trigger);
+          keyMap[keyChar.toLowerCase()] = trigger;
+          root.appendChild(btn);
+        });
+      }
+
+      buildPads('voice0-grid', keysV0, 0);
+      buildPads('voice1-grid', keysV1, 1);
+
+      window.addEventListener('keydown', function (e) {
+        if (e.repeat) return;
+        var fn = keyMap[(e.key || '').toLowerCase()];
+        if (fn) fn();
+      });
+
+      document.getElementById('reward-btn').addEventListener('click', function () {
+        ensureStarted().then(function () {
+          synth.playMelody('step_reward');
+          logEl.textContent = 'Playing step_reward phrase (G4 -> C5 -> E5)';
+        });
+      });
+
+      document.getElementById('melody-btn').addEventListener('click', function () {
+        ensureStarted().then(function () {
+          synth.playMelody('session_complete');
+          logEl.textContent = 'Playing session_complete celebratory melody';
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

@@ -10,9 +10,9 @@ One small interface the analysis loop talks to:
 
 Backends
   * `EdgeImpulseClassifier` — runs an Edge Impulse Linux model file (`.eim`)
-    through the `edge_impulse_linux` SDK. Drop the exported model at
-    `EI_MODEL_PATH` (config.py) and `pip install edge_impulse_linux` on the
-    board; it is picked up automatically on the next start. Audio impulses
+    with a small stdlib socket client (`EimRunner`), so no pip packages are
+    needed on the board. Drop the exported model at `EI_MODEL_PATH`
+    (config.py); it is picked up automatically on the next start. Audio impulses
     take raw int16 samples as features — the DSP block (MFE/MFCC) lives inside
     the `.eim`, so nothing here needs to change when the model is retrained.
   * `PlaceholderClassifier` — used until the model exists. Returns no scores,
@@ -27,10 +27,16 @@ from __future__ import annotations
 
 import argparse
 import array
+import json
 import os
+import shutil
+import socket
+import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
-from typing import Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 
 THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
@@ -67,16 +73,77 @@ class PlaceholderClassifier:
         return
 
 
+class EimRunner:
+    """
+    Minimal stdlib client for an Edge Impulse `.eim` model (no pip packages needed).
+    The `.eim` is a native executable: started as `<model.eim> <socket path>`, it
+    serves JSON requests on that Unix socket and terminates each reply with a NUL
+    byte — the same protocol `edge_impulse_linux.runner.ImpulseRunner` speaks.
+    """
+
+    def __init__(self, model_path: str, start_timeout: float = 20.0) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="eim-")
+        sock_path = os.path.join(self._tmpdir, "runner.sock")
+        self._proc = subprocess.Popen(
+            [model_path, sock_path], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        )
+        deadline = time.monotonic() + start_timeout
+        while not os.path.exists(sock_path):
+            if self._proc.poll() is not None:
+                err = (self._proc.stderr.read() if self._proc.stderr else b"").decode(errors="replace").strip()
+                self.stop()
+                raise RuntimeError(f"model exited with code {self._proc.returncode}: {err[-300:]}")
+            if time.monotonic() > deadline:
+                self.stop()
+                raise RuntimeError("model did not open its socket in time")
+            time.sleep(0.05)
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.connect(sock_path)
+        self._id = 1
+
+    def _send(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        msg["id"] = self._id
+        self._id += 1
+        self._sock.sendall(json.dumps(msg).encode("utf-8"))
+        data = bytearray()
+        while not data.endswith(b"\x00"):
+            chunk = self._sock.recv(65536)
+            if not chunk:
+                raise RuntimeError("model closed the connection")
+            data += chunk
+        resp = json.loads(bytes(data[:-1]).decode("utf-8"))
+        if resp.get("success") is not True:
+            raise RuntimeError(f"model error: {resp.get('error', resp)}")
+        return resp
+
+    def init(self) -> Dict[str, Any]:
+        return self._send({"hello": 1})
+
+    def classify(self, features: List[int]) -> Dict[str, Any]:
+        return self._send({"classify": features})
+
+    def stop(self) -> None:
+        try:
+            self._sock.close()
+        except Exception:
+            pass
+        if self._proc.poll() is None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+
 class EdgeImpulseClassifier:
-    """Runs an Edge Impulse Linux `.eim` audio model via `edge_impulse_linux.runner.ImpulseRunner`."""
+    """Runs an Edge Impulse Linux `.eim` audio model through `EimRunner`."""
 
     def __init__(self, model_path: str) -> None:
-        from edge_impulse_linux.runner import ImpulseRunner  # type: ignore
-
         path = os.path.abspath(model_path)
         if not os.access(path, os.X_OK):
             os.chmod(path, 0o755)  # .eim files are executables; copies often lose +x
-        self._runner = ImpulseRunner(path)
+        self._runner = EimRunner(path)
         info = self._runner.init()
         params = info["model_parameters"]
         project = info.get("project", {})
@@ -114,8 +181,6 @@ def load_classifier(model_path: Optional[str] = EI_MODEL_PATH, verbose: bool = T
                 if verbose:
                     print(f"[Classifier] {clf.name}: {clf.window_samples} samples @ {clf.sample_rate} Hz, labels={clf.labels}")
                 return clf
-            except ImportError:
-                reason = "edge_impulse_linux not installed (pip install edge_impulse_linux)"
             except Exception as exc:
                 reason = f"failed to start {p.name}: {type(exc).__name__}: {exc}"
     if verbose:

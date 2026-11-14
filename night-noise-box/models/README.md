@@ -7,7 +7,8 @@ is still measured and uploaded, `sources` is empty and readings carry the flag `
 
 1. Export the model from Edge Impulse (Deployment -> Linux (AARCH64)), or on the board:
    `edge-impulse-linux-runner --download models/noise-classifier.eim`
-2. Install the Python SDK on the board: `pip3 install edge_impulse_linux`
+2. Nothing to install: `python/classifier.py` talks to the `.eim` over its local socket
+   using only the Python standard library.
 3. Check that it loads: `python3 python/classifier.py`. This prints the model's labels, window size and sample rate.
 4. If the model's labels differ from the names you want on the map, map them in
    `EI_LABEL_MAP` (`"car": "traffic"`, `"silence": ""` to drop a class).

@@ -55,7 +55,7 @@ PROFILES: Dict[str, ThresholdProfile] = {
 # audio) are POSTed as JSON when an event ends. Set UPLOAD_URL = "" to keep
 # the box fully offline. Override at startup with `--upload-url`.
 # ---------------------------------------------------------------------------
-UPLOAD_URL: str = "http://localhost:8080/api/events"
+UPLOAD_URL: str = "http://192.168.127.235:8080/api/events"
 DEVICE_ID: str = "box-01"
 DEVICE_LAT: float = 52.5200   # Where this box sits — set to your real location
 DEVICE_LON: float = 13.4050

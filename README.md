@@ -15,6 +15,7 @@ We built a small bedside and window-sill box on the Arduino UNO Q that listens f
 
 - **`night-noise-box/`** — everything that goes on the UNO Q, as a self-contained Arduino App Lab app: `app.yaml`, `sketch/` (STM32 firmware + pinned `sketch.yaml` build profile), `python/` (Linux side), `assets/` (local web page). Copy it to the board with `night-noise-box/deploy.sh <board-ip>`, or open the folder directly in App Lab, then press **Run**.
 - **`server/`** — the Noise Map server; runs on your computer, not the board.
+- **`server/static/map/`** — the Otaniemi street-level noise map (MapLibre + OSM street propagation model, imported from `noise-maps-prototype`). See its own `README.md`.
 
 ## Noise Map Server (`server/`)
 
@@ -28,6 +29,7 @@ python3 night-noise-box/python/main.py --source fake     # uploads to UPLOAD_URL
 - Set `UPLOAD_URL`, `DEVICE_ID`, `DEVICE_LAT`, `DEVICE_LON` in `python/config.py` (or `--upload-url` at startup). On the board, point `UPLOAD_URL` at the server machine's LAN IP.
 - Payload: `{"device_id", "lat", "lon", "events": [<event record>, ...]}`; records are upserted on `(device_id, id)` so a later "woke me" press updates the same event.
 - The map (Leaflet + OpenStreetMap tiles) draws a loudness-weighted heatmap; click anywhere to see the label breakdown and list of noises recorded there. Filter by label, time range, night hours, and toggle the simulated test data. `--no-seed` starts empty, `--reseed` regenerates test data, `--center lat,lon` moves it.
+- **Street-level map** at `http://localhost:8080/map/`: models noise along the real Otaniemi street network and corrects it with station readings. For now it runs on its built-in demo feed. It expects `GET /api/readings` (per-minute `v: 1` payloads, see `server/static/map/README.md`), which this server doesn't implement yet.
 
 ## Dependencies (One-Line Reasons)
 

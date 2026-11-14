@@ -1,231 +1,80 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Noise Map</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<style>
-  :root {
-    --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #e3e1dc;
-    --accent: #e4572e;
-    --traffic: #3b82f6; --construction: #f59e0b; --music: #a855f7;
-    --voices: #10b981; --background: #94a3b8; --unknown: #64748b;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #151517; --panel: #1f1f22; --ink: #ececef; --muted: #9a9aa2; --line: #2f2f34; }
-  }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
-    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  #map { position: absolute; inset: 0; }
-  /* Mute the busy OSM style so the heatmap stands out */
-  .leaflet-tile-pane { filter: saturate(0.35) brightness(1.04) contrast(0.9); }
-  .panel { position: absolute; z-index: 1000; background: var(--panel); border: 1px solid var(--line);
-    border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.12); padding: 12px 14px; }
-  #controls { top: 12px; left: 56px; max-width: min(440px, calc(100vw - 72px)); }
-  h1 { font-size: 16px; margin: 0 0 2px; }
-  .sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
-  .row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
-  .chip { border: 1px solid var(--line); background: transparent; color: var(--ink); border-radius: 999px;
-    padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
-  .chip[aria-pressed="false"] { opacity: .4; }
-  .chip.sel { background: var(--ink); color: var(--panel); border-color: var(--ink); }
-  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-  label.tog { font-size: 12px; color: var(--muted); display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
-  #stats { font-size: 12px; color: var(--muted); margin-top: 8px; }
-  #legend { bottom: 24px; left: 12px; font-size: 11px; color: var(--muted); padding: 8px 10px; }
-  .ramp { width: 160px; height: 8px; border-radius: 4px; margin: 4px 0 2px;
-    background: linear-gradient(90deg, #2c7bb6, #abd9e9, #ffffbf, #fdae61, #d7191c); }
-  .ramp-l { display: flex; justify-content: space-between; }
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0d12" />
+    <title>Noise map</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.1/dist/maplibre-gl.css" integrity="sha384-uTttxo/aOKbdE5RlD/SPzSDoDmNvGlUYPjONi2MN/b7c9HPSvW07OIuyP7uL6jxK" crossorigin="anonymous" />
+    <link rel="stylesheet" href="src/styles.css" />
+    <script>
+      // Point the map at the backend here (or use ?api=…). Leave null for the demo feed.
+      // mapStyle: any MapLibre style URL (default: OpenFreeMap dark, no key needed).
+      window.NM_CONFIG = { apiBase: null };
+    </script>
+  </head>
+  <body>
+    <main class="app">
+      <div id="map" class="map" role="region" aria-label="Noise map. Tap a street or sensor for details."></div>
 
-  .leaflet-popup-content-wrapper { background: var(--panel); color: var(--ink); border-radius: 10px; }
-  .leaflet-popup-tip { background: var(--panel); }
-  .leaflet-popup-content { margin: 12px 14px; width: 300px !important; max-width: calc(100vw - 60px); }
-  .pop h3 { margin: 0 0 2px; font-size: 14px; }
-  .pop .meta { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
-  .bar { display: grid; grid-template-columns: 84px 1fr 28px; gap: 6px; align-items: center; font-size: 12px; margin: 3px 0; }
-  .bar .track { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
-  .bar .fill { height: 100%; border-radius: 4px; }
-  .bar .n { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .list { max-height: 210px; overflow: auto; margin-top: 8px; border-top: 1px solid var(--line); }
-  .ev { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
-  .ev .lbl { font-weight: 600; display: flex; gap: 6px; align-items: center; }
-  .ev .db { text-align: right; font-variant-numeric: tabular-nums; }
-  .ev .t { color: var(--muted); grid-column: 1 / -1; }
-  .tag { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--accent); color: var(--accent); font-weight: 600; }
-  .tag.sim { border-color: var(--muted); color: var(--muted); }
-  @media (max-width: 560px) {
-    #controls { left: 12px; right: 12px; top: auto; bottom: 12px; max-width: none; }
-    #legend { display: none; }
-  }
-</style>
-</head>
-<body>
-<div id="map"></div>
+      <header class="top">
+        <form class="search" role="search" autocomplete="off">
+          <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" /><path d="M15.5 15.5 20 20" /></svg>
+          <input id="search" type="search" placeholder="Search" aria-label="Search a place" aria-controls="results" />
+        </form>
+        <ul id="results" class="results" role="listbox" hidden></ul>
+        <div id="status" class="status" data-state="loading" role="status">
+          <i class="status-dot"></i><span class="status-text">Loading measurements…</span>
+        </div>
+      </header>
 
-<div id="controls" class="panel">
-  <h1>Night-Noise Map</h1>
-  <div class="sub">Heat = events weighted by loudness. Click the map to see what was heard there.</div>
-  <div class="row" id="labels"></div>
-  <div class="row" id="ranges"></div>
-  <div class="row">
-    <label class="tog"><input type="checkbox" id="nightOnly"> Night only (22–06)</label>
-    <label class="tog"><input type="checkbox" id="showBoxes"> Show boxes</label>
-    <label class="tog"><input type="checkbox" id="showSim" checked> Include test data</label>
-  </div>
-  <div id="stats">Loading…</div>
-</div>
+      <div class="legend" aria-label="Colour scale from 40 to 80 decibels">
+        <span>40</span><i class="legend-bar"></i><span class="legend-max">80<br />dB</span>
+      </div>
 
-<div id="legend" class="panel">
-  Noise intensity
-  <div class="ramp"></div>
-  <div class="ramp-l"><span>quiet</span><span>loud</span></div>
-</div>
+      <button id="locate" class="locate" type="button" aria-label="Show my location">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6.2" /><circle cx="12" cy="12" r="2.2" class="fill" /><path d="M12 2.5v3.3M12 18.2v3.3M2.5 12h3.3M18.2 12h3.3" /></svg>
+      </button>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script>
-const LABELS = ["traffic", "construction", "music", "voices", "background", "unknown"];
-const css = getComputedStyle(document.documentElement);
-const COLOR = Object.fromEntries(LABELS.map(l => [l, css.getPropertyValue("--" + l).trim()]));
-const RANGES = [["24 h", 24], ["3 days", 72], ["7 days", 168], ["All", 0]];
-const CLICK_RADIUS_PX = 28;
+      <section id="sheet" class="sheet" aria-hidden="true" hidden aria-labelledby="sheet-title">
+        <div class="sheet-grab">
+          <div class="sheet-handle"></div>
+          <div class="sheet-head">
+            <h2 id="sheet-title" class="sheet-title"></h2>
+            <button class="sheet-close" type="button" aria-label="Close">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+            </button>
+          </div>
+        </div>
+        <div class="sheet-main">
+          <div class="reading"><span class="reading-value"></span><span class="reading-unit">dB</span></div>
+          <div class="category">
+            <div class="category-row"><i class="category-dot"></i><span class="category-label"></span></div>
+            <div class="category-desc"></div>
+          </div>
+        </div>
+        <div class="chart" aria-label="Hourly levels over the last 24 hours">
+          <div class="bars"></div>
+          <div class="now-track"><i class="now-dot"></i></div>
+          <div class="axis"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div>
+        </div>
+        <div class="sheet-details" hidden></div>
+        <p class="sheet-meta" hidden></p>
+      </section>
+    </main>
 
-const state = { labels: new Set(LABELS), hours: 168, nightOnly: false, showBoxes: false, showSim: true, data: { events: [], devices: [] } };
-let fitted = false;
-
-const map = L.map("map", { zoomControl: true }).setView([52.52, 13.405], 13);
-L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19,
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-}).addTo(map);
-
-const heat = L.heatLayer([], {
-  radius: 28, blur: 22, minOpacity: 0.25, maxZoom: 16,
-  gradient: { 0.2: "#2c7bb6", 0.4: "#abd9e9", 0.6: "#ffffbf", 0.8: "#fdae61", 1.0: "#d7191c" },
-}).addTo(map);
-const boxLayer = L.layerGroup();
-
-// ---------- controls ----------
-const labelsEl = document.getElementById("labels");
-for (const l of LABELS) {
-  const b = document.createElement("button");
-  b.className = "chip"; b.setAttribute("aria-pressed", "true");
-  b.innerHTML = `<span class="dot" style="background:${COLOR[l]}"></span>${l}`;
-  b.onclick = () => {
-    state.labels.has(l) ? state.labels.delete(l) : state.labels.add(l);
-    b.setAttribute("aria-pressed", state.labels.has(l)); render();
-  };
-  labelsEl.appendChild(b);
-}
-const rangesEl = document.getElementById("ranges");
-for (const [name, h] of RANGES) {
-  const b = document.createElement("button");
-  b.className = "chip" + (h === state.hours ? " sel" : ""); b.textContent = name;
-  b.onclick = () => {
-    state.hours = h;
-    [...rangesEl.children].forEach(c => c.classList.toggle("sel", c === b));
-    load();
-  };
-  rangesEl.appendChild(b);
-}
-document.getElementById("nightOnly").onchange = e => { state.nightOnly = e.target.checked; render(); };
-document.getElementById("showSim").onchange = e => { state.showSim = e.target.checked; render(); };
-document.getElementById("showBoxes").onchange = e => {
-  state.showBoxes = e.target.checked;
-  state.showBoxes ? boxLayer.addTo(map) : boxLayer.remove();
-};
-
-// ---------- data ----------
-function isNight(iso) { const h = +iso.slice(11, 13); return h >= 22 || h < 6; }
-function visibleEvents() {
-  return state.data.events.filter(e =>
-    state.labels.has(e.label) && (state.showSim || !e.sim) && (!state.nightOnly || isNight(e.start)));
-}
-function weight(e) { return Math.max(0.08, Math.min(1, (e.avg - 40) / 35)); }
-
-function render() {
-  const evs = visibleEvents();
-  heat.setLatLngs(evs.map(e => [e.lat, e.lon, weight(e)]));
-
-  boxLayer.clearLayers();
-  for (const d of state.data.devices) {
-    if (d.sim && !state.showSim) continue;
-    L.circleMarker([d.lat, d.lon], {
-      radius: d.sim ? 4 : 7, weight: 2, color: d.sim ? "#64748b" : "#e4572e", fillOpacity: d.sim ? .3 : .9,
-    }).bindTooltip(`${d.device}${d.sim ? " (test)" : ""} · ${d.events} events`).addTo(boxLayer);
-  }
-
-  const real = state.data.devices.filter(d => !d.sim).length;
-  document.getElementById("stats").textContent =
-    `${evs.length.toLocaleString()} events shown · ${real} real box${real === 1 ? "" : "es"}` +
-    (state.showSim ? ` · ${state.data.devices.length - real} simulated` : "");
-
-  if (!fitted && evs.length) {
-    fitted = true;
-    map.fitBounds(L.latLngBounds(evs.map(e => [e.lat, e.lon])).pad(0.1));
-  }
-}
-
-async function load() {
-  try {
-    const r = await fetch(`/api/events?hours=${state.hours}`);
-    state.data = await r.json();
-    render();
-  } catch (err) {
-    document.getElementById("stats").textContent = "Could not reach the server — retrying…";
-  }
-}
-
-// ---------- click to inspect ----------
-function fmtTime(iso) {
-  const d = new Date(iso);
-  return d.toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
-}
-function fmtDur(ms) { return ms < 1000 ? `${ms} ms` : ms < 60000 ? `${(ms / 1000).toFixed(1)} s` : `${(ms / 60000).toFixed(1)} min`; }
-function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
-
-map.on("click", ev => {
-  const p0 = map.latLngToContainerPoint(ev.latlng);
-  const near = visibleEvents().filter(e => map.latLngToContainerPoint([e.lat, e.lon]).distanceTo(p0) <= CLICK_RADIUS_PX);
-
-  if (!near.length) {
-    L.popup().setLatLng(ev.latlng).setContent(`<div class="pop"><h3>Quiet here</h3><div class="meta">No noise events recorded near this spot with the current filters.</div></div>`).openOn(map);
-    return;
-  }
-
-  const counts = {};
-  for (const e of near) counts[e.label] = (counts[e.label] || 0) + 1;
-  const max = Math.max(...Object.values(counts));
-  const devices = new Set(near.map(e => e.device));
-  const loudest = near.reduce((a, b) => (b.peak > a.peak ? b : a));
-  const woke = near.filter(e => e.woke).length;
-  const avg = near.reduce((s, e) => s + e.avg, 0) / near.length;
-  const bars = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([l, n]) => `
-    <div class="bar"><span><span class="dot" style="background:${COLOR[l]}"></span> ${l}</span>
-      <div class="track"><div class="fill" style="width:${(n / max) * 100}%;background:${COLOR[l]}"></div></div>
-      <span class="n">${n}</span></div>`).join("");
-  const list = [...near].sort((a, b) => b.start.localeCompare(a.start)).slice(0, 40).map(e => `
-    <div class="ev">
-      <span class="lbl"><span class="dot" style="background:${COLOR[e.label]}"></span>${esc(e.label)}
-        ${e.woke ? '<span class="tag">woke me</span>' : ""}${e.sim ? '<span class="tag sim">test</span>' : ""}</span>
-      <span class="db">${e.avg.toFixed(0)} dB <span style="color:var(--muted)">/ ${e.peak.toFixed(0)} peak</span></span>
-      <span class="t">${fmtTime(e.start)} · ${fmtDur(e.dur)} · ${esc(e.device)}</span>
-    </div>`).join("");
-
-  L.popup({ maxWidth: 340 }).setLatLng(ev.latlng).setContent(`
-    <div class="pop">
-      <h3>${near.length} noise event${near.length === 1 ? "" : "s"} here</h3>
-      <div class="meta">${devices.size} box${devices.size === 1 ? "" : "es"} · avg ${avg.toFixed(0)} dB · loudest ${loudest.peak.toFixed(0)} dB (${esc(loudest.label)})${woke ? ` · ${woke} woke someone` : ""}</div>
-      ${bars}
-      <div class="list">${list}</div>
-      ${near.length > 40 ? `<div class="meta" style="margin-top:6px">Showing latest 40 of ${near.length}.</div>` : ""}
-    </div>`).openOn(map);
-});
-
-load();
-setInterval(load, 10000);
-</script>
-</body>
+    <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.1/dist/maplibre-gl.js" integrity="sha384-nXMl9YiLoSG5KBPTFgvxVuIqQQcqIvo0bFrvoEaGJC6r7IibIzF1S36Zbf/sKBtL" crossorigin="anonymous"></script>
+    <script src="src/config.js"></script>
+    <script src="src/util.js"></script>
+    <script src="src/osm-roads.js"></script>
+    <script src="src/data.js"></script>
+    <script src="src/field.js"></script>
+    <script src="src/store.js"></script>
+    <script src="src/mock.js"></script>
+    <script src="src/api.js"></script>
+    <script src="src/map.js"></script>
+    <script src="src/sheet.js"></script>
+    <script src="src/search.js"></script>
+    <script src="src/app.js"></script>
+  </body>
 </html>

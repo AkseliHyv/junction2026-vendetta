@@ -174,7 +174,15 @@ def load_classifier(model_path: Optional[str] = EI_MODEL_PATH, verbose: bool = T
         if not p.is_absolute():
             p = THIS_DIR.parent / p
         if not p.exists():
-            reason = f"model file not found at {p}"
+            # Fall back to the newest .eim next to the configured path, so a
+            # freshly exported model works without editing config.py.
+            candidates = sorted(p.parent.glob("*.eim"), key=lambda f: (f.stat().st_mtime, f.name))
+            if candidates:
+                if verbose:
+                    print(f"[Classifier] {p.name} not found, using {candidates[-1].name}")
+                p = candidates[-1]
+        if not p.exists():
+            reason = f"no .eim model in {p.parent}"
         else:
             try:
                 clf = EdgeImpulseClassifier(str(p))

@@ -1,6 +1,7 @@
 # Edge Impulse model
 
 Put the exported Edge Impulse **Linux (AARCH64)** model here as `noise-classifier.eim`
+(or any `*.eim` name: if that file is missing, the newest `.eim` in this folder is used)
 (path set by `EI_MODEL_PATH` in `python/config.py`). Until that file exists,
 `python/analysis.py` runs with a placeholder classifier: loudness (LAeq / Lmax / L90)
 is still measured and uploaded, `sources` is empty and readings carry the flag `no_model`.

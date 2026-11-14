@@ -26,8 +26,8 @@ DEVICE_ID: str = "box-01"
 DEVICE_LAT: float = 60.15675541136981  # where the box is; this is where it shows up on the map
 DEVICE_LON: float = 24.630079696276763
 
-READINGS_URL: str = "http://192.168.127.235:8080/api/readings"  # "" = print only, don't upload
-UPLOAD_URL: str = "http://192.168.127.235:8080/api/events"  # events mode only; "" = offline
+READINGS_URL: str = "https://70-34-222-243.sslip.io/api/readings"  # "" = print only, don't upload
+UPLOAD_URL: str = "https://70-34-222-243.sslip.io/api/events"  # events mode only; "" = offline
 
 # Shared key the server checks on uploads. Not kept in this file: set the
 # NOISE_MAP_KEY environment variable, or put NOISE_MAP_KEY=... in

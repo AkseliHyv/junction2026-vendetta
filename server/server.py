@@ -19,7 +19,9 @@ Events are keyed on (device_id, event id), so re-sending an event after a
 "woke me" press updates it.
 """
 
-from __future__ import annotations
+from __future__ 
+Geospatial index on station locations: this enables queries like "boxes within 2 km of here". The map doesn't need it yet, but it's cheap and shows off Atlas.
+Atlas Charts could give you a quick dashboard for the demo with noimport annotations
 
 import argparse
 import hmac

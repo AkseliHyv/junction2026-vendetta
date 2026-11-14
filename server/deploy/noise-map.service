@@ -11,6 +11,7 @@ Wants=network-online.target
 [Service]
 User=noisemap
 WorkingDirectory=/opt/noise-map
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/noise-map/venv/bin/python server/server.py --host 127.0.0.1 --port 8080 --no-seed
 Restart=on-failure
 RestartSec=3

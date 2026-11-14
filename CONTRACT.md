@@ -1,86 +1,153 @@
-# CONTRACT.md — Shared Message & Timing Specification
+# CONTRACT.md — Night-Noise Box Message, Storage & Privacy Specification
 
-**Owner:** Agent 0 (Architecture & Protocol Lead)  
-**Rule:** Every module (`sketch/sketch.ino`, `python/pose.py`, `python/exercises.py`, `python/main.py`, `assets/synth.js`, `assets/index.html`) implements this exact contract. No message name, argument order, field name, or unit may change without updating this document first.
-
----
-
-## 1. Timing & Privacy Invariants
-
-1. **Wrist-Driven Onsets Only:** Note onsets (`note_on`) are triggered exclusively by microcontroller `strike` events (or explicit simulated strikes on a laptop), never by camera frame arrivals.
-2. **Pose Sets Pitch & Harmony Only:** Camera pose estimation updates cached `left` and `right` normalized arm heights (`0.0` = hand resting at lap, `1.0` = hand raised comfortably overhead while seated). When a `strike` arrives, Linux maps the latest cached arm levels to notes in the C major pentatonic scale (`C4, D4, E4, G4, A4, C5, D5, E5`) in `< 1 ms`.
-3. **Latency Budget:** Target `< 100 ms` end-to-end from wrist strike detection to Web Audio scheduling in the browser. Every Linux -> Browser message carries `ts_ms` (Unix epoch milliseconds, `int(time.time() * 1000)`) so end-to-end latency is logged.
-4. **Strict Visual Privacy:** Camera frames exist only in volatile RAM inside `python/pose.py`. Frames are never saved to disk and never transmitted to the browser.
-5. **Never-Fail Rehabilitation UX:** No message or UI state represents "failure", "error", or "wrong pose". Unreached steps wait patiently while movement continues making music.
+**Scope:** Every runtime module (`python/config.py`, `sketch/sketch.ino`, `python/audio.py`, `python/store.py`, `python/main.py`, `assets/index.html`) implements this exact contract. No message name, argument order, field name, or unit may change without updating this document first.
 
 ---
 
-## 2. Channel A: Microcontroller <-> Linux (`Arduino_RouterBridge` / `arduino.app_utils.Bridge`)
+## 1. System, Configuration & Privacy Invariants
 
-Transport: RPC / asynchronous notifications via `Bridge.notify(name, ...)` (fire-and-forget for low latency) and `Bridge.provide(name, handler)`.
+1. **Zero Audio Persistence or Transmission:**
+   - The USB microphone is connected to the UNO Q Linux side only; the STM32 microcontroller never receives audio samples.
+   - Inside `python/audio.py`, PCM samples exist only in a fixed-size in-memory buffer (`array('h')`) that is overwritten in place on every window.
+   - Raw or encoded audio is **never** written to disk, **never** sent over the Bridge or network, **never** included in CSV exports, and **never** printed to logs. Test audio files may exist only under `tests/` and are never read by the running application.
+2. **Offline-Only Runtime:**
+   - Nothing in the application calls the internet at runtime: no cloud APIs, no map tiles, no external fonts, and no CDN scripts. `assets/index.html` is the sole frontend and loads all scripts, styles, and the static area background image (`assets/area-map.svg`) locally from `assets/`.
+3. **Single Configuration File (`python/config.py`):**
+   - Holds every tunable default in one place:
+     - `AUDIO_SOURCE`: `"fake"` | `"live"` (default `"fake"`). Overridable via `python3 python/main.py --source fake|live`.
+     - `CALIBRATION_OFFSET_DB`: `float` (default `94.0` dB). Overridden at startup when `<db>.calibration.json` exists next to the SQLite database.
+     - `GRID_CELL`: `str` (default `"B2"`), one configured constant for this physical UNO Q box on the area heatmap.
+     - `RETENTION_DAYS`: `int` (default `14`).
+     - `DEFAULT_PROFILE`: `"night"` (`"night"` | `"demo"`).
+     - `PROFILES`:
+       - `"night"`: `{"start_db": 52.0, "end_db": 45.0, "start_hold_ms": 375, "end_hold_ms": 625}`
+       - `"demo"`: `{"start_db": 70.0, "end_db": 62.0, "start_hold_ms": 375, "end_hold_ms": 625}` (for a loud exhibition hall)
+4. **Allowed Noise Labels:**
+   - Edge Impulse classifier output is normalized to one of five canonical acoustic classes:
+     `"traffic"`, `"construction"`, `"music"`, `"voices"`, `"background"`.
+   - Stored event records may additionally use `"unknown"` **only** when `woke_me()` creates a standalone record because no event is open and no event ended within the last 10 minutes.
+5. **Loudness Calibration (`dBFS` -> `dB`):**
+   - `python/audio.py` computes uncalibrated window loudness `raw_db` in `dBFS` (`<= 0.0`) from RMS amplitude and adds `CALIBRATION_OFFSET_DB` to obtain calibrated loudness `level_db` (`0.0 .. 120.0 dB`).
+   - When calibrated from the web page against a handheld reference sound meter reading `phone_db`, Linux sets `CALIBRATION_OFFSET_DB = round(phone_db - mean_raw_db_last_3s, 1)` (averaging `raw_db` over the preceding 3 seconds) and persists `{"offset_db": float, "calibrated_at": "YYYY-MM-DDTHH:MM:SS"}` to `<db>.calibration.json` next to the SQLite database so it survives restarts.
+6. **Hardware Roles on Qwiic (`Wire1`, Microcontroller Side):**
+   - `ModulinoPixels`: Live 8-LED loudness bar driven by `level(db)`, plus a distinct `"no signal"` pattern if the 2-second watchdog trips.
+   - `ModulinoButtons`: Rising-edge press emits `woke_me()`.
+   - `ModulinoMovement`: Polled at **~20 Hz (`50 ms`)** to detect box movement and emit `tamper()`.
+   - `ModulinoKnob`: Existing setup/polling code in `sketch/sketch.ino` is left in place unused (ignored by Linux; not built upon). `ModulinoThermo` is not added.
 
-### A1. Microcontroller -> Linux (`Bridge.notify` in C++, `Bridge.provide` in Python)
+---
 
-| Message Name | Direction | Positional Args | Types & Units | Max / Typical Rate | Semantics |
+## 2. Division of Event Responsibility & Timing Rules
+
+1. **MCU Decides Event Boundaries Only (Runtime-Tunable Thresholds):**
+   - The microcontroller decides **only** `event_start` and `event_end`.
+   - `sketch/sketch.ino` defines named default constants at the top of the file (`START_THRESHOLD_DB = 52.0f`, `END_THRESHOLD_DB = 45.0f`, `START_HOLD_MS = 375UL`, `END_HOLD_MS = 625UL`, `NO_SIGNAL_TIMEOUT_MS = 2000UL`) in the same `dB` (and `ms`) units as `level(db)`, and updates its active runtime thresholds whenever `set_thresholds(start_db, end_db, start_hold_ms, end_hold_ms)` arrives from Linux (sent on startup and on profile switch).
+   - **Linux** timestamps `start_time` upon receipt of `event_start` and computes `avg_level` and `peak_level` across the calibrated `level(db)` windows observed while the event is open.
+2. **Event Label & Confidence Rule:**
+   - An event's `label` is the label that was **active for the longest total time** during the event (`event_start` -> `event_end`).
+   - Its `confidence` is the **time-weighted average confidence** of that winning label over the time it was active during the event.
+3. **`woke_me()` Attachment Rule:**
+   - If an event is currently open, `woke_me()` sets `woke_me = True` on that open event.
+   - Else if the latest completed event ended **less than 10 minutes (`600 s`) ago**, `woke_me()` sets `woke_me = True` on that stored record in SQLite and re-emits `event(record)` and `heatmap(data)`.
+   - Else Linux creates and stores a standalone event record at the current timestamp with `duration_ms = 0`, `label = "unknown"`, `confidence = 0.0`, `avg_level` = latest `level(db)`, `peak_level` = latest `level(db)`, `woke_me = True`, `tamper` = active tamper latch, and `grid_cell = GRID_CELL`, then emits `event(record)` and `heatmap(data)`.
+4. **`tamper()` Attachment Rule:**
+   - `tamper()` immediately sets `tamper = True` on the currently open event (if any) **and** starts/extends a **60-second latch** (`TAMPER_LATCH_SEC = 60.0`) so **any event starting within 60 seconds after `tamper()`** also receives `tamper = True`.
+5. **MCU 2-Second Signal Watchdog & 1-Second Heartbeat:**
+   - If the microcontroller receives no `level(db)` message from Linux for **2 seconds (`2000 ms`)**, it immediately sends `event_end(duration_ms)` if an event is open, resets its threshold state, and renders a distinct `"no signal"` pattern on `ModulinoPixels` until `level(db)` resumes.
+   - The microcontroller emits `heartbeat()` once every **1 second (`1000 ms`)** so Linux can report MCU responsiveness (`mcu_responding = True` when a heartbeat was received within the last `3.0 s`).
+
+---
+
+## 3. Channel A: Linux <-> Microcontroller (`arduino.app_utils.Bridge` / `Arduino_RouterBridge`)
+
+Transport: Asynchronous notifications via `Bridge.notify(name, ...)` and registered handlers via `Bridge.provide(name, handler)`.
+
+### A1. Linux -> Microcontroller (`Bridge.notify` in Python, `Bridge.provide` in C++)
+
+| Message Name | Direction | Positional Args | Types & Units | Rate | Semantics |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `strike` | MCU -> Linux | `(intensity)` | `float` in `0.05 .. 1.00` (dimensionless normalized jerk/acceleration peak above threshold) | Event-driven, debounced (`>= 95 ms` gap, max ~10 Hz) | Immediate wrist strike onset. Triggers `note_on` in Linux using current arm heights. |
-| `tempo` | MCU -> Linux | `(bpm)` | `int` in `30 .. 220` (`beats per minute`) | Event-driven on >= 2 strikes within 2.5 s (max ~4 Hz) | Rolling median inter-strike tempo computed over last 4 strike intervals. |
-| `button` | MCU -> Linux | `(button_id)` | `int` in `{0, 1, 2}` (`0` = Button A: Mode toggle, `1` = Button B: Next exercise / Start session, `2` = Button C: Record custom pose step) | Event-driven on press edge, debounced (`50 ms`) | Modulino Buttons physical press event. |
-| `knob` | MCU -> Linux | `(value)` | `int` in `0 .. 100` (percent normalized rotary position) | On change (`>= 1` step delta), max 20 Hz | Modulino Knob position. Maps linearly to Instruct Mode pose tolerance (`0` = `0.06` strict, `100` = `0.28` gentle; default `50` = `0.17`). |
+| `level` | Linux -> MCU | `(db)` | `float` in `0.0 .. 120.0` (calibrated `dB`) | ~`8 Hz` (`~125 ms` window) | Resets the 2 s MCU watchdog, updates the `ModulinoPixels` light bar, and feeds the MCU hysteresis detector (`activeStartDb` / `activeEndDb`). |
+| `label` | Linux -> MCU | `(name, confidence)` | `name: str` (`"traffic" \| "construction" \| "music" \| "voices" \| "background"`), `confidence: float` (`0.0 .. 1.0`) | Event-driven **only when `name` changes** | Informs the MCU when the active acoustic label changes (never carries audio). |
+| `set_thresholds` | Linux -> MCU | `(start_db, end_db, start_hold_ms, end_hold_ms)` | `start_db: float` (`dB`), `end_db: float` (`dB`, `< start_db`), `start_hold_ms: int` (`ms`), `end_hold_ms: int` (`ms`) | Sent on Linux startup and whenever the active profile (`"night"` / `"demo"`) changes | Updates runtime hysteresis thresholds and hold durations on the MCU without reflashing. |
 
-### A2. Linux -> Microcontroller (`Bridge.notify` in Python, `Bridge.provide` in C++)
+### A2. Microcontroller -> Linux (`Bridge.notify` in C++, `Bridge.provide` in Python)
 
-| Message Name | Direction | Positional Args | Types & Units | Max / Typical Rate | Semantics |
+| Message Name | Direction | Positional Args | Types & Units | Rate | Semantics |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `set_pixels` | Linux -> MCU | `(pattern)` | `str` enum: `"idle"`, `"free_pulse"`, `"progress_0"` .. `"progress_8"`, `"celebrate"` | Event-driven on strike, step change, or mode change (max 15 Hz) | Updates the 8 RGB LEDs on `ModulinoPixels` (never uses red; uses warm amber, teal, sky blue, and soft gold). |
+| `event_start` | MCU -> Linux | `()` | None | Event-driven | Fired when `level(db) >= activeStartDb` continuously for `activeStartHoldMs` while no event is open. Linux timestamps `start_time` on receipt and begins accumulating levels and label durations. |
+| `event_end` | MCU -> Linux | `(duration_ms)` | `duration_ms: int` (`ms >= 0`) | Event-driven | Fired when an open event's `level(db) <= activeEndDb` continuously for `activeEndHoldMs`, **or** when the 2-second `"no signal"` watchdog trips while an event is open. Linux finalizes and stores the event record. |
+| `woke_me` | MCU -> Linux | `()` | None | Event-driven on button press, debounced (`>= 200 ms`) | Applies the Section 2.3 `woke_me` rule (open event -> ended `< 10 min` ago -> standalone `"unknown"` record). |
+| `tamper` | MCU -> Linux | `()` | None | Event-driven from ~20 Hz IMU poll, debounced (`>= 1000 ms`) | Applies the Section 2.4 `tamper` rule (marks open event and any event starting within the next `60 s`). |
+| `heartbeat` | MCU -> Linux | `()` | None | `1 Hz` (`1000 ms`) | Periodic liveness signal from the MCU so Linux diagnostics can report whether the microcontroller is responding. |
+| `mcu_level` | MCU -> Linux | `(db)` | `float` in `0.0 .. 120.0` (calibrated `dB`) | Optional (~`8 Hz`), **unused by default** | Optional fallback path if loudness is measured from an analog microphone on the MCU while Linux runs only the `AudioClassification` brick for labels. |
+
+*(Legacy unused message: `knob(value: int)` remains in `sketch/sketch.ino`; `python/main.py` registers a no-op receiver and does not act on it.)*
 
 ---
 
-## 3. Channel B: Linux -> Browser (`WebUI.send_message(event, payload)` over Socket.IO)
+## 4. Event Record Schema (`python/store.py` SQLite, Wire & CSV Export Format)
 
-Transport: Arduino App Lab `WebUI` brick (`from arduino.app_bricks.web_ui import WebUI`), pushing JSON dictionaries over Socket.IO (`socket.on(event, payload)`). Every payload is a JSON object containing `"ts_ms"` (`int`, epoch ms).
+Persisted in local SQLite (`python/store.py` via standard-library `sqlite3`, no storage brick) and pruned automatically when records are older than `RETENTION_DAYS` (default `14` days). CSV exports contain **only** these 10 scalar columns in this order.
 
-| Event Name | Direction | JSON Payload Fields & Units | Rate | Description |
+| Field Name | Python / JSON Type | SQLite Column Type | Units / Allowed Values | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `note_on` | Linux -> Browser | `{"note": int (MIDI 60..88), "velocity": float (0.05..1.0), "voice": int (0=left marimba, 1=right bell), "ts_ms": int}` | Event-driven on `strike` (1 or 2 voices per strike) | Triggers immediate Web Audio synthesis and visual wrist ripple. |
-| `note_off` | Linux -> Browser | `{"voice": int (0\|1), "ts_ms": int}` | Event-driven (optional sustain release) | Gently releases sustained voice envelope if active. |
-| `target_melody` | Linux -> Browser | `{"kind": str ("step_reward" \| "session_complete"), "notes": list[int] (MIDI notes), "ts_ms": int}` | Event-driven on step match or session completion | Plays the encouraging reward phrase (`step_reward`) or full celebratory melody (`session_complete`). |
-| `state` | Linux -> Browser | `{"left": float (0.0..1.0), "right": float (0.0..1.0), "person_present": bool, "pose_fps": float, "fallback_wrist_only": bool, "tolerance": float (0.06..0.28), "bpm": int, "hold_progress": float (0.0..1.0), "pixels": str, "ts_ms": int}` | `15 Hz` steady tick (`66 ms`) | Live smoothed seated arm heights, sensor health, hold match ratio (`0..1`), and active Modulino Pixels state. |
-| `mode` | Linux -> Browser | `{"mode": str ("free" \| "instruct"), "exercise_id": str, "exercises": list[{"id": str, "name": str, "step_count": int}], "custom_count": int, "ts_ms": int}` | On connection + on mode/exercise change | Authoritative mode and available exercise catalog owned by Linux. |
-| `step` | Linux -> Browser | `{"index": int (0-based), "total": int, "left": float (0.0..1.0), "right": float (0.0..1.0), "tolerance": float (0.06..0.28), "hold_sec": float (s), "instruction": str, "exercise_name": str, "ts_ms": int}` | On session start + each step transition + tolerance change | Current target arm pose and 1-line 2m-readable instruction for the ghost stick figure. |
-| `step_reached` | Linux -> Browser | `{"index": int (0-based), "total": int, "ts_ms": int}` | Event-driven when hold completes | Confirms target pose held for `hold_sec` within `tolerance`. |
-| `session_done` | Linux -> Browser | `{"steps_completed": int, "total_steps": int, "duration_sec": float, "exercise_name": str, "notes_played": int, "ts_ms": int}` | Event-driven after final step completes | Session summary displayed on screen alongside celebratory melody. |
+| `id` | `int` | `INTEGER PRIMARY KEY AUTOINCREMENT` | `>= 1` | Unique local record identifier. |
+| `start_time` | `str` | `TEXT NOT NULL` | ISO-8601 local timestamp (`"YYYY-MM-DDTHH:MM:SS"`) | Timestamp recorded by Linux upon receiving `event_start` (or standalone `woke_me`). |
+| `duration_ms` | `int` | `INTEGER NOT NULL` | Milliseconds (`>= 0`) | Duration reported by `event_end(duration_ms)` (`0` for standalone `"unknown"` `woke_me` records). |
+| `label` | `str` | `TEXT NOT NULL` | `"traffic" \| "construction" \| "music" \| "voices" \| "background" \| "unknown"` | Label active for the longest total time during the event (`"unknown"` only for standalone `woke_me`). |
+| `confidence` | `float` | `REAL NOT NULL` | `0.0 .. 1.0` | Average confidence of the winning `label` over the time it was active during the event (`0.0` for `"unknown"`). |
+| `avg_level` | `float` | `REAL NOT NULL` | `dB` (`round(..., 1)`) | Mean of `level(db)` samples observed by Linux during the event. |
+| `peak_level` | `float` | `REAL NOT NULL` | `dB` (`round(..., 1)`) | Maximum `level(db)` sample observed by Linux during the event. |
+| `woke_me` | `bool` | `INTEGER NOT NULL` (`0` or `1`) | `true` / `false` | `true` if marked via `woke_me()`. |
+| `tamper` | `bool` | `INTEGER NOT NULL` (`0` or `1`) | `true` / `false` | `true` if `tamper()` fired during the event or within `60 s` prior to `event_start`. |
+| `grid_cell` | `str` | `TEXT NOT NULL` | Configured constant `GRID_CELL` (e.g. `"B2"`) | Single configured area-grid cell identifier for this box. |
 
 ---
 
-## 4. Channel C: Browser -> Linux (`socket.emit(event, payload)` -> `WebUI.on_message`)
+## 5. Channel B: Linux -> Browser (`WebUI.send_message(event, payload)`)
 
-Transport: Socket.IO client `socket.emit(event, payload)` caught by `web_ui.on_message(event, handler)`. The page never mutates mode or step state locally without the board's broadcast, except when running in explicit offline browser-only demo mode (`NO_BOARD_SIM`).
+Transport: Arduino App Lab `WebUI` brick over Socket.IO (`socket.on(event, payload)`), with local HTTP/SSE fallback (`/api/events`, `/api/cmd`, `/export.csv`) when running `python/main.py` on a laptop without App Lab.
 
-| Event Name | Direction | JSON Payload Fields & Units | Rate | Description |
+| Event Name | Direction | JSON Payload Structure | Rate | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `set_mode` | Browser -> Linux | `{"mode": str ("free" \| "instruct")}` | User action | Switches between Free instrument mode and Guided Instruct mode. |
-| `start_session` | Browser -> Linux | `{"exercise_id": str}` | User action | Starts (or restarts) a preset exercise or `"custom"` recorded exercise in Instruct mode. |
-| `record_step` | Browser -> Linux | `{"hold_sec": float (optional, default 1.5)}` | Physio action | Captures the player's current `(left, right)` arm levels as a new step in the `"custom"` exercise. |
-| `clear_custom` | Browser -> Linux | `{}` | Physio action | Clears all physio-recorded custom steps. |
-| `client_latency` | Browser -> Linux | `{"latency_ms": float, "strike_ts_ms": int}` | Event-driven after `note_on` audio scheduling | Optional telemetry echo allowing `python/main.py` to print measured strike-to-sound browser latency in terminal logs. |
+| `live` | Linux -> Browser | `{"level": float, "raw_db": float, "label": str}` | ~`8 Hz` | Current calibrated loudness (`level` in `dB`), uncalibrated raw loudness (`raw_db` in `dBFS`), and active acoustic `label`. |
+| `event` | Linux -> Browser | `record` dict matching **Section 4** (`id`, `start_time`, `duration_ms`, `label`, `confidence`, `avg_level`, `peak_level`, `woke_me`, `tamper`, `grid_cell`) | Event-driven on `event_end`, standalone `woke_me`, or `woke_me` update | Newly completed or updated noise event record. |
+| `heatmap` | Linux -> Browser | `{"night": list[NightBucket], "area": list[AreaBucket], "hours": list[int], "labels": list[str], "box_cell": str, "recent_events": list[EventRecord]}` | On browser connect + after every `event` insert/update/prune | Pre-aggregated buckets for both heatmaps (plus up to 20 recent event records for initial table hydration) on `assets/index.html`. |
+| `diagnostics` | Linux -> Browser | `{"audio_source": str, "active_profile": str, "profiles": dict, "calibration_offset_db": float, "calibrated_at": str \| null, "sec_since_last_level": float \| null, "mcu_responding": bool, "events_stored": int, "db_size_bytes": int, "board_time_iso": str, "board_epoch_ms": int}` | `1 Hz` + on connect, profile change, or calibration update | Telemetry for the collapsible Diagnostics panel, profile controls, calibration status, and board-vs-browser clock skew check (`> 120 s` warning). |
+| `csv_export` | Linux -> Browser | `{"filename": str, "csv": str}` | On `export_csv` request | Complete CSV export of stored scalar event records (`Section 4` columns only; never audio). |
+
+### `heatmap(data)` Pre-Aggregated Bucket Shapes
+
+1. **Night View Buckets (`data.night`)** — Hours of the night across (`data.hours`, e.g. `[22, 23, 0, 1, 2, 3, 4, 5, 6]`), noise labels down (`data.labels`):
+   ```json
+   {
+     "hour": 23,
+     "label": "traffic",
+     "count": 4,
+     "avg_level": 61.2,
+     "woke_count": 1
+   }
+   ```
+   - Colour encodes how loud (`avg_level`) and how often (`count`).
+   - Cells with `woke_count > 0` are visibly outlined to mark `"woke me"` events.
+
+2. **Area View Buckets (`data.area`)** — Plain grid drawn over a static background image (`assets/area-map.svg`) served locally from `assets/`:
+   ```json
+   [
+     { "cell": "B2", "count": 7, "avg_level": 58.4, "simulated": false },
+     { "cell": "A3", "count": 5, "avg_level": 54.0, "simulated": true }
+   ]
+   ```
+   - Exactly one cell (`cell == GRID_CELL`, `"simulated": false`) reflects real SQLite records from this box.
+   - Sample neighbour cells carry `"simulated": true` and **must** be visibly labelled `"simulated"` on the page.
 
 ---
 
-## 5. Pentatonic Scale Mapping (Shared Reference)
+## 6. Channel C: Browser -> Linux (`socket.emit(event, payload)`)
 
-Arm height `h` in `[0.0, 1.0]` maps to an 8-note C Major Pentatonic scale (harmonious in every combination — zero dissonant intervals):
-
-| Band (`0..7`) | Height Range | MIDI Note | Pitch Name | Frequency (Hz) |
-| :--- | :--- | :--- | :--- | :--- |
-| `0` | `0.000 – 0.124` | `60` | `C4` | `261.63` |
-| `1` | `0.125 – 0.249` | `62` | `D4` | `293.66` |
-| `2` | `0.250 – 0.374` | `64` | `E4` | `329.63` |
-| `3` | `0.375 – 0.499` | `67` | `G4` | `392.00` |
-| `4` | `0.500 – 0.624` | `69` | `A4` | `440.00` |
-| `5` | `0.625 – 0.749` | `72` | `C5` | `523.25` |
-| `6` | `0.750 – 0.874` | `74` | `D5` | `587.33` |
-| `7` | `0.875 – 1.000` | `76` | `E5` | `659.25` |
-
-- **Voice `0` (Left Arm):** Warm wooden marimba fundamental (`C4..E5`).
-- **Voice `1` (Right Arm):** Soft celesta/bell harmonic voice (`G4..G5` or pentatonic fifth/octave pairing when moving together). When `fallback_wrist_only` is active (camera absent or no person detected), strikes cycle gracefully through a soothing pentatonic arpeggio `[60, 64, 67, 69, 72, 69, 67, 64]` so wrist movement always makes music.
+| Event Name | Direction | JSON Payload | Description |
+| :--- | :--- | :--- | :--- |
+| `request_state` | Browser -> Linux | `{}` | Sent by `assets/index.html` on load/reconnect so Linux immediately pushes current `live`, `heatmap`, and `diagnostics`. |
+| `set_profile` | Browser -> Linux | `{"profile": "night" \| "demo"}` | Switches active threshold profile, sends `set_thresholds(...)` to the MCU, and broadcasts updated `diagnostics`. |
+| `calibrate` | Browser -> Linux | `{"phone_db": float}` | Sets `CALIBRATION_OFFSET_DB = phone_db - mean_raw_db_last_3s`, persists `<db>.calibration.json` next to SQLite, updates live calibration immediately, and broadcasts `live` + `diagnostics`. |
+| `export_csv` | Browser -> Linux | `{}` | Triggers `csv_export` carrying all stored event records in CSV format (never audio). |

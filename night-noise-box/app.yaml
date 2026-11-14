@@ -1,0 +1,7 @@
+name: Night-Noise Box
+description: "Listens for night-time noise, classifies events, shows Night/Area heatmaps on a local page and uploads event records (never audio) to the Noise Map server."
+icon: 🌙
+ports:
+  - 7000
+bricks:
+  - arduino:web_ui: {}

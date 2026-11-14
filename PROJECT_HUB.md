@@ -1,39 +1,42 @@
-# Arduino Project Hub Draft: Movement-to-Music Rehab Instrument on UNO Q
+# Night-Noise Box on Arduino UNO Q
 
-## Overview
-We built an offline movement-to-music instrument for care homes and physical rehabilitation clinics using the Arduino UNO Q and four Modulino nodes. A seated player wears the Modulino Movement IMU on their wrist while sitting in front of a USB camera connected to the UNO Q. Arm height chooses notes from a C major pentatonic scale, and gentle wrist flicks trigger immediate musical notes in a web browser over the local network.
+## What We Built
+We built a small offline night-noise monitor on the Arduino UNO Q. It sits on a bedside table or window sill, listens for loud events overnight, labels what caused them (`traffic`, `construction`, `music`, `voices`, or `background`) using an on-device Edge Impulse sound model, and draws a Night Heatmap and an Area Heatmap on a local web page served by the board.
 
-Everything runs locally on the board and browser. We never connect to the cloud, we never save camera frames to disk, and we never send camera images to the browser.
+If a loud noise wakes us up, we press a button on the box without looking at a screen. If someone moves or bumps the box, the motion sensor flags `tamper` so bumped readings are not mistaken for street noise.
 
-## Components Used
-- 1x **Arduino UNO Q** (Linux Cortex-A53 MPU + STM32 Zephyr MCU)
-- 1x **Arduino Modulino Movement** (LSM6DSOX 6-axis IMU, worn on a soft wrist strap)
-- 1x **Arduino Modulino Buttons** (3 push-buttons with LEDs for mode switch, exercise selection, and pose recording)
-- 1x **Arduino Modulino Knob** (rotary encoder for adjusting pose-matching tolerance)
-- 1x **Arduino Modulino Pixels** (8 addressable RGB LEDs for calm progress and strike feedback)
-- 4x **Qwiic I2C cables** (including one long flexible cable for the wrist sensor)
-- 1x **USB UVC Webcam** (connected to the UNO Q Linux host port)
-- 1x **Laptop, tablet, or phone** on the same local Wi-Fi network (for screen display and Web Audio playback)
+## Components
+- 1x **Arduino UNO Q** (Linux microprocessor + STM32 microcontroller)
+- 1x **USB Microphone** (plugged into the UNO Q Linux USB host port)
+- 1x **Arduino Modulino Pixels** (8 RGB LEDs for the live loudness bar and `"no signal"` alert)
+- 1x **Arduino Modulino Buttons** (button press marks `"woke me"`)
+- 1x **Arduino Modulino Movement** (6-axis IMU polled at ~20 Hz for tamper detection)
+- 3x **Qwiic I2C cables**
+- 1x **Phone, tablet, or laptop** on the same local Wi-Fi network to view the page and calibrate
+
+*(If an existing Modulino Knob is still on the Qwiic chain from earlier prototyping, the sketch leaves it harmlessly unused.)*
 
 ## Wiring
 1. Plug a Qwiic cable into the **Qwiic (`Wire1`)** port on the Arduino UNO Q.
-2. Daisy-chain **Modulino Buttons** -> **Modulino Knob** -> **Modulino Pixels** on the table so a physiotherapist or care worker can reach them easily.
-3. Connect **Modulino Movement** at the end of the Qwiic chain using a flexible cable and attach it to a comfortable wrist band.
-4. Plug the USB webcam into the UNO Q USB host port and aim it at chest height toward the player's chair from roughly 1.8 to 2.0 metres away.
+2. Daisy-chain **Modulino Pixels** -> **Modulino Buttons** -> **Modulino Movement** and mount them inside or on top of the enclosure so the buttons and LEDs are reachable from bed and the IMU sits flat with the box.
+3. Plug the **USB microphone** into the UNO Q USB host port on the Linux side.
 
 ## How It Works
-We split the work across the three parts of the system so note timing stays crisp (under 100 ms from wrist motion to sound):
+We split the job between the Linux side, the STM32 microcontroller, and the browser:
 
-1. **STM32 Microcontroller (`sketch/sketch.ino`):** Polls `ModulinoMovement` at 200 Hz, removes gravity with a lightweight exponential filter, detects wrist strikes with a 95 ms debounce, and calculates rolling median tempo in BPM. It also reads `ModulinoButtons` and `ModulinoKnob` and updates `ModulinoPixels`. Events are sent immediately to Linux via `Bridge.notify`.
-2. **Linux Microprocessor (`python/main.py`, `python/pose.py`, `python/exercises.py`):** Reads `320x240` frames from the USB camera in memory, extracts shoulder and wrist heights (`0.0` at lap to `1.0` overhead), and discards the frame immediately. When a `strike` arrives from the STM32, Linux pairs the latest arm heights with C major pentatonic notes and pushes small JSON events (`note_on`, `state`, `step`, `session_done`) through the App Lab `WebUI` brick over Socket.IO.
-3. **Browser Screen & Synth (`assets/index.html`, `assets/synth.js`):** Pre-allocates a Web Audio API voice pool when the user clicks **Start Audio** (a warm marimba voice for the left arm and a soft bell voice for the right arm). It draws a high-contrast stick figure readable from two metres away.
+- **Linux (`python/config.py`, `python/audio.py`, `python/store.py`, `python/main.py`):** Reads 125 ms windows (~8 Hz) from the microphone, computes raw loudness (`dBFS`) plus our saved calibration offset (`dB`), and gets the Edge Impulse class label. It sends `level(db)` ~8 times a second and `label(name, confidence)` on changes over the `Bridge`. When the microcontroller reports `event_start()` and `event_end(duration_ms)`, Linux records the timestamp, average/peak dB, and the label active for the longest time in a local `sqlite3` database, then updates the browser heatmaps.
+- **Microcontroller (`sketch/sketch.ino`):** Keeps the hysteresis detector (`Night`: start `52 dB`, end `45 dB`; `Demo`: start `70 dB`, end `62 dB`, switchable live via `set_thresholds`), updates the 8-LED bar on `ModulinoPixels`, watches `ModulinoButtons` for `woke_me()`, polls `ModulinoMovement` at ~20 Hz for `tamper()`, sends a 1 Hz `heartbeat()`, and shows a distinct outer-LED `"no signal"` pattern if `level(db)` stops for 2 seconds.
+- **Local Web Page (`assets/index.html`, `assets/area-map.svg`):** Displays calibrated `dB` and raw `dBFS` in large type readable from 2 metres, switches between **Night** and **Demo** profiles without reflashing, calibrates against a phone sound-meter reading over a 3-second average, plots the Night Heatmap (hours across, labels down, `"woke me"` outlined) and Area Heatmap (one real cell for our box plus neighbour cells clearly marked `"simulated"`), shows a collapsible Diagnostics panel, and exports stored event records as CSV.
 
-### Two Modes for Care and Play
-- **Free Mode:** Every wrist motion plays harmonious pentatonic notes. If the camera is unplugged or nobody is in frame, the board automatically falls back to a soothing wrist-driven arpeggio so music never stops.
-- **Instruct Mode:** Displays a dashed ghost stick figure for seated exercises (`Morning Sun Reach`, `Alternating Wing Lift`, `Gentle Rowing Balance`, `Crown & Heart Opening`, plus custom poses recorded live by a physiotherapist pressing Button C). Matching the pose within the Knob's tolerance fills a calm progress ring, plays an uplifting phrase, and advances the Modulino Pixels. We never show red or "wrong" states—unreached poses wait patiently while movement keeps making music.
+## Privacy by Design
+We designed the box so raw audio cannot leak or be replayed:
+- The microcontroller never sees audio; only scalar `level(db)` and `label` cross the `Bridge`.
+- In `python/audio.py`, PCM samples sit in one fixed-size 2000-sample `array('h')` buffer in RAM that is overwritten in place every 125 ms.
+- We never write audio to disk, never send audio to the browser, and never include audio in logs or CSV exports.
+- Nothing calls the internet at runtime: all CSS, JS, and the area grid SVG are served locally from `assets/`, and records older than `RETENTION_DAYS` (14 days) are automatically deleted from SQLite.
 
 ## How to Run It
-1. Clone this repository into **Arduino App Lab** on the Arduino UNO Q and ensure the **WebUI - HTML** brick is enabled on port `7000`.
-2. Click **Run** in App Lab to flash `sketch/sketch.ino` to the STM32 and start `python/main.py` on Debian Linux.
-3. On a laptop or tablet on the same local network, open `http://<uno-q-ip>:7000` and click **Start Audio**.
-4. Use **Button A** (or the screen toggle) to switch between **Free Mode** and **Instruct Mode**, **Button B** to start the next seated exercise, **Button C** to record a custom pose step, and the **Knob** to make matching gentler or more precise.
+1. **On a laptop (with fake audio):** Run `python3 night-noise-box/python/main.py --source fake` and open `http://localhost:7000`.
+2. **On the UNO Q with fake audio first:** Open the folder in **Arduino App Lab**, enable the **WebUI - HTML** brick on port `7000`, leave `AUDIO_SOURCE = "fake"` in `python/config.py`, and click **Run**. Open `http://<uno-q-ip>:7000`.
+3. **Switch profiles & calibrate:** Use **Demo** (`70 / 62 dB`) when testing in a noisy room and **Night** (`52 / 45 dB`) overnight. Hold a phone sound-meter app beside the microphone, type its dB reading into **Loudness Calibration**, and click **Calibrate**; the offset is saved to JSON next to the SQLite database so it survives restarts.
+4. **Enable live microphone:** Complete the `TODO(BOARD-CHECK)` hook in `LiveAudioSource.read_window()` (`python/audio.py`) with your Edge Impulse model on the UNO Q and change `AUDIO_SOURCE` to `"live"` in `python/config.py`.

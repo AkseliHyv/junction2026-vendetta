@@ -1,25 +1,15 @@
 #!/usr/bin/env python3
-"""
-Night-Noise Box — Sound-source classifier (python/classifier.py)
-----------------------------------------------------------------
-One small interface the analysis loop talks to:
+"""Sound-source classifier.
 
-    clf.window_samples   # how many int16 samples one classification needs
-    clf.sample_rate      # Hz the model expects (the mic is opened at this rate)
-    clf.classify(buf)    # -> {label: score}  (scores 0..1, raw model labels)
+EdgeImpulseClassifier runs an Edge Impulse Linux model (.eim). The .eim is an
+executable that answers JSON requests on a Unix socket; EimRunner talks to it
+with the standard library, so nothing needs installing on the board. The
+model does its own feature extraction, so retraining needs no code changes.
 
-Backends
-  * `EdgeImpulseClassifier` — runs an Edge Impulse Linux model file (`.eim`)
-    with a small stdlib socket client (`EimRunner`), so no pip packages are
-    needed on the board. Drop the exported model at `EI_MODEL_PATH`
-    (config.py); it is picked up automatically on the next start. Audio impulses
-    take raw int16 samples as features — the DSP block (MFE/MFCC) lives inside
-    the `.eim`, so nothing here needs to change when the model is retrained.
-  * `PlaceholderClassifier` — used until the model exists. Returns no scores,
-    so uploads carry honest empty `sources` plus a `"no_model"` flag instead
-    of made-up labels.
+PlaceholderClassifier is used when there's no model. It returns no scores, so
+uploads have empty `sources` and a "no_model" flag rather than made-up labels.
 
-    python3 python/classifier.py              # report which backend would load
+    python3 python/classifier.py              # show which model loads
     python3 python/classifier.py --model x.eim
 """
 
@@ -57,7 +47,6 @@ class Classifier(Protocol):
 
 
 class PlaceholderClassifier:
-    """Stand-in until the Edge Impulse model is exported. Classifies nothing."""
 
     name = "placeholder"
 
@@ -74,12 +63,8 @@ class PlaceholderClassifier:
 
 
 class EimRunner:
-    """
-    Minimal stdlib client for an Edge Impulse `.eim` model (no pip packages needed).
-    The `.eim` is a native executable: started as `<model.eim> <socket path>`, it
-    serves JSON requests on that Unix socket and terminates each reply with a NUL
-    byte — the same protocol `edge_impulse_linux.runner.ImpulseRunner` speaks.
-    """
+    """Starts `<model.eim> <socket>` and sends it JSON requests. Each reply ends
+    with a NUL byte (same protocol as edge_impulse_linux's ImpulseRunner)."""
 
     def __init__(self, model_path: str, start_timeout: float = 20.0) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="eim-")
@@ -137,8 +122,6 @@ class EimRunner:
 
 
 class EdgeImpulseClassifier:
-    """Runs an Edge Impulse Linux `.eim` audio model through `EimRunner`."""
-
     def __init__(self, model_path: str) -> None:
         path = os.path.abspath(model_path)
         if not os.access(path, os.X_OK):
@@ -149,7 +132,7 @@ class EdgeImpulseClassifier:
         project = info.get("project", {})
         self.name = f"edge-impulse:{project.get('name', Path(path).stem)}#{project.get('deploy_version', '?')}"
         self.sample_rate = int(params["frequency"])
-        self.window_samples = int(params["input_features_count"])  # raw samples per inference
+        self.window_samples = int(params["input_features_count"])
         self.labels = list(params.get("labels", []))
         if int(params.get("sensor", 1)) != 1:
             print(f"[Classifier] warning: model sensor={params.get('sensor')} is not a microphone model", file=sys.stderr)
@@ -167,15 +150,14 @@ class EdgeImpulseClassifier:
 
 
 def load_classifier(model_path: Optional[str] = EI_MODEL_PATH, verbose: bool = True) -> Classifier:
-    """Edge Impulse model if present and loadable, otherwise the placeholder."""
+    """Loads the .eim model, or the placeholder if there is none or it fails to start."""
     reason = "no model path configured"
     if model_path:
         p = Path(model_path)
         if not p.is_absolute():
             p = THIS_DIR.parent / p
         if not p.exists():
-            # Fall back to the newest .eim next to the configured path, so a
-            # freshly exported model works without editing config.py.
+            # Use the newest .eim in the folder so a new export works without editing config.py.
             candidates = sorted(p.parent.glob("*.eim"), key=lambda f: (f.stat().st_mtime, f.name))
             if candidates:
                 if verbose:

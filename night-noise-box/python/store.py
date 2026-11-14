@@ -1,19 +1,9 @@
 #!/usr/bin/env python3
-"""
-Night-Noise Box — SQLite Event Store, Heatmap Aggregator & CSV Exporter (python/store.py)
------------------------------------------------------------------------------------------
-Uses Python standard-library `sqlite3` and `csv` only (no storage brick, zero
-external dependencies). Stores and exports scalar event metadata only—never audio.
+"""SQLite storage for events mode: event records, heatmap data and CSV export.
 
-Implements `/CONTRACT.md` Sections 4 & 5:
-  - Event record fields: `id`, `start_time`, `duration_ms`, `label`,
-    `confidence`, `avg_level`, `peak_level`, `woke_me`, `tamper`, `grid_cell`.
-  - Day-based retention pruning (`RETENTION_DAYS` from `python/config.py`).
-  - `< 10 minute` lookback update for `woke_me()`.
-  - Pre-aggregated `heatmap(data)` buckets for Night and Area views.
-  - Diagnostics metrics (`count_events()`, `db_size_bytes()`) and `export_csv_text()`.
+Only the numbers in CSV_COLUMNS are stored. Events older than RETENTION_DAYS
+are deleted on every insert.
 
-Laptop check:
     python3 python/store.py --self-test
 """
 
@@ -62,7 +52,7 @@ CSV_COLUMNS: Tuple[str, ...] = (
     "grid_cell",
 )
 
-# Replayed sample neighbour cells for the Area Heatmap (always `simulated: True`)
+# Made-up neighbouring cells so the area heatmap isn't a single square.
 SIMULATED_AREA_CELLS: List[Dict[str, Any]] = [
     {"cell": "A1", "count": 3, "avg_level": 51.4, "simulated": True},
     {"cell": "A3", "count": 6, "avg_level": 59.8, "simulated": True},
@@ -136,7 +126,6 @@ class NoiseStore:
         }
 
     def prune_old_events(self, now_dt: Optional[datetime] = None) -> int:
-        """Deletes records older than `self.retention_days` days."""
         ref_dt = now_dt if now_dt is not None else datetime.now()
         cutoff_iso = (ref_dt - timedelta(days=self.retention_days)).strftime("%Y-%m-%dT%H:%M:%S")
         with self._lock:
@@ -198,11 +187,8 @@ class NoiseStore:
         now_epoch: Optional[float] = None,
         max_age_sec: float = 600.0,
     ) -> Optional[Dict[str, Any]]:
-        """
-        If the latest stored event ended less than `max_age_sec` (default 600 s =
-        10 minutes) ago, sets `woke_me = True` on it and returns its updated
-        record; otherwise returns `None`.
-        """
+        """Sets woke_me on the latest event if it ended less than max_age_sec ago.
+        Returns the updated record, or None."""
         ref_epoch = float(now_epoch if now_epoch is not None else time.time())
         with self._lock:
             row = self._conn.execute(
@@ -253,10 +239,6 @@ class NoiseStore:
             return pages * size
 
     def export_csv_text(self) -> str:
-        """
-        Exports stored event records ONLY (CONTRACT.md Section 4 columns).
-        Never includes audio samples or internal columns.
-        """
         with self._lock:
             rows = self._conn.execute(
                 """
@@ -289,11 +271,10 @@ class NoiseStore:
         return buf.getvalue()
 
     def build_heatmap_data(self) -> Dict[str, Any]:
-        """
-        Builds pre-aggregated `heatmap(data)` matching `/CONTRACT.md` Section 5:
-          - `night`: list of `{hour, label, count, avg_level, woke_count}`
-          - `area`:  list of `{cell, count, avg_level, simulated}`
-          - `recent_events`: up to 20 latest event records
+        """Data for the local page:
+          night:          [{hour, label, count, avg_level, woke_count}]
+          area:           [{cell, count, avg_level, simulated}]
+          recent_events:  the 20 latest events
         """
         with self._lock:
             night_rows = self._conn.execute(
@@ -381,16 +362,12 @@ class NoiseStore:
             self._conn.close()
 
 
-# ---------------------------------------------------------------------------
-# Laptop Self-Test
-# ---------------------------------------------------------------------------
 def run_self_test() -> None:
-    print("=== Store Check: python/store.py (SQLite, Retention, Woke, Heatmaps & CSV Export) ===")
     store = NoiseStore(db_path=":memory:", retention_days=7, grid_cell="B2")
     ref_now = datetime(2026, 11, 14, 2, 30, 0)
     ref_epoch = ref_now.timestamp()
 
-    # 1. Insert an expired event (10 days old) + a fresh night event -> expired must be pruned
+    # An event older than the retention period is pruned on the next insert.
     store.insert_event(
         start_time="2026-11-01T23:15:00",
         duration_ms=2400,
@@ -420,15 +397,13 @@ def run_self_test() -> None:
     records = store.list_recent_events()
     assert len(records) == 1 and records[0]["id"] == fresh["id"], "Old record (>7d) must be pruned"
 
-    # 2. Verify < 10 min woke_me attaches to `fresh`
+    # "Woke me" attaches to an event that ended under 10 minutes ago, but not later.
     updated = store.mark_latest_recent_woke_me(now_epoch=ref_epoch, max_age_sec=600.0)
     assert updated is not None and updated["id"] == fresh["id"] and updated["woke_me"] is True
 
-    # 3. Verify >= 10 min does NOT attach to `fresh`
     expired_lookup = store.mark_latest_recent_woke_me(now_epoch=ref_epoch + 700.0, max_age_sec=600.0)
     assert expired_lookup is None
 
-    # 4. Verify pre-aggregated heatmap shapes match CONTRACT.md Section 5
     hm = store.build_heatmap_data()
     assert hm["night"] == [
         {"hour": 2, "label": "traffic", "count": 1, "avg_level": 62.3, "woke_count": 1}
@@ -443,7 +418,6 @@ def run_self_test() -> None:
     }
     assert len(sim_cells) >= 2
 
-    # 5. Verify CSV export contains exact 10 event record columns only
     csv_text = store.export_csv_text()
     parsed = list(csv.reader(io.StringIO(csv_text)))
     assert tuple(parsed[0]) == CSV_COLUMNS
@@ -451,7 +425,7 @@ def run_self_test() -> None:
     assert parsed[1][3] == "traffic" and parsed[1][7] == "true" and parsed[1][9] == "B2"
 
     store.close()
-    print("=== PASS: SQLite retention, woke_me lookback, heatmaps & CSV export verified ===")
+    print("store self-test passed")
 
 
 def main() -> None:

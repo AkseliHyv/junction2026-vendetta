@@ -1,21 +1,18 @@
-/* Wiring: data refresh every 15 minutes, map ↔ sheet ↔ search, my location. */
+/* Wiring: polls for data, and connects the map, the station sheet and search. */
 (function () {
   const U = NM.util, T = NM.time, D = NM.data;
   const SOURCE_LABEL = { traffic: 'Traffic', construction: 'Construction', voices: 'Voices', nature: 'Nature' };
 
-  let selected = null; // what the sheet shows: { type, ... }
+  let selected = null; // the station shown in the sheet: { id, lon, lat }
   let lastRefresh = 0;
   let timer = null;
   let liveStations = [];
-  let userPos = null; // world position from geolocation, if inside the mapped area
   let status = null, flashTimer = null;
   const statusEl = document.getElementById('status');
 
   // ---- Boot -----------------------------------------------------------------------
-  NM.field.build();
-  NM.field.update([], Date.now()); // model-only field until data arrives
   try {
-    NM.map.init(document.getElementById('map'), { onTap: openHit });
+    NM.map.init(document.getElementById('map'), { onTap: openStation });
   } catch (err) {
     // No MapLibre (CDN unreachable) or no WebGL: keep the rest of the UI alive.
     console.error('[noise-map] map failed to start', err);
@@ -64,10 +61,8 @@
     liveStations = all.filter((s) => s.stats && s.stats.ok && !s.stats.stale);
     const t = liveStations.length ? Math.max(...liveStations.map((s) => s.stats.end)) : now;
 
-    const local = liveStations.filter((s) => s.inArea); // only these correct the street model
-    NM.field.update(local.map((s) => ({ x: s.x, y: s.y, laeq: s.stats.laeq })), t);
     NM.map.refresh(
-      all.filter((s) => s.stats && s.stats.ok).map((s) => ({ id: s.id, x: s.x, y: s.y, db: s.stats.laeq, stale: s.stats.stale }))
+      all.filter((s) => s.stats && s.stats.ok).map((s) => ({ id: s.id, lon: s.lon, lat: s.lat, db: s.stats.laeq, stale: s.stats.stale }))
     );
 
     const offline = all.length - liveStations.length;
@@ -76,10 +71,10 @@
       setStatus(NM.api.isDemo ? 'demo' : 'live', `${label} · updated ${T.hhmm(t)}`,
         `${liveStations.length} of ${all.length} sensors reporting` + (offline ? ` · ${offline} offline` : ''));
     } else {
-      setStatus('error', 'No recent measurements · showing typical levels');
+      setStatus('error', 'No recent measurements');
     }
 
-    if (selected) openHit(selected, { keepView: true });
+    if (selected) openStation(selected, { keepView: true });
   }
 
   function setStatus(kind, text, title = '') {
@@ -105,12 +100,9 @@
     if (!navigator.geolocation) return flash('Location is not available in this browser');
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        const p = NM.geo.toWorld(pos.coords.longitude, pos.coords.latitude);
-        const W = D.world;
-        // Outside the street model the marker is still shown; street search just ignores the position.
-        userPos = p.x < W.x0 || p.x > W.x1 || p.y < W.y0 || p.y > W.y1 ? null : p;
+        const p = { lon: pos.coords.longitude, lat: pos.coords.latitude };
         NM.map.setUser(p);
-        NM.map.reveal(p.x, p.y, 0, { force: true, zoom: 16 });
+        NM.map.reveal(p, 0, { force: true, zoom: 15 });
       },
       (err) => flash(err.code === err.PERMISSION_DENIED ? 'Location permission denied' : 'Could not get your location'),
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
@@ -118,47 +110,26 @@
   }
 
   // ---- Selection -----------------------------------------------------------------
-  function stationsHourly() {
-    return liveStations.filter((s) => s.inArea).map((s) => ({ x: s.x, y: s.y, hours: NM.store.hourly(s.id) }));
-  }
-
-  function openHit(hit, opts = {}) {
+  /** Open the sheet for a station: { id, lon, lat }. Tapping empty map passes null. */
+  function openStation(hit, opts = {}) {
     if (!hit) return;
-    selected = hit;
     const now = Date.now();
-    const nowHour = T.hm(now).h;
-    const updated = liveStations.length ? Math.max(...liveStations.map((s) => s.stats.end)) : null;
-    let data;
-
-    if (hit.type === 'station') {
-      const st = D.stations.find((s) => s.id === hit.id);
-      const stats = NM.store.latest(st.id, now);
-      if (!stats || !stats.ok) return;
-      const top = stats.sources[0];
-      data = {
-        title: st.name,
-        db: stats.laeq,
-        bars: NM.store.hourly(st.id, now),
-        nowHour,
-        desc: stats.stale ? `Offline since ${T.hhmm(stats.end)}` : top ? `Mostly ${SOURCE_LABEL[top[0]]?.toLowerCase() || top[0]}` : undefined,
-        detailsHtml: stationDetails(stats),
-        meta: `Sensor ${st.id} · ${T.hhmm(stats.start)}–${T.hhmm(stats.end)}` + (stats.flags.length ? ` · flagged: ${stats.flags.join(', ')}` : ''),
-      };
-    } else {
-      const bars = NM.field.hourlyAt(hit.x, hit.y, stationsHourly());
-      bars[nowHour] = NM.field.dbAt(hit.x, hit.y); // the bar for "now" matches the headline value
-      data = {
-        title: hit.type === 'road' ? hit.road.name || roadTitle(hit.road, hit.x, hit.y) : hit.name || placeName(hit.x, hit.y),
-        db: NM.field.dbAt(hit.x, hit.y),
-        bars,
-        nowHour,
-        meta: updated ? `Estimated from nearby sensors · updated ${T.hhmm(updated)}` : 'Typical levels · no recent measurements',
-      };
-    }
-
-    const sheetH = NM.sheet.show(data);
-    NM.map.select({ x: hit.x, y: hit.y });
-    if (!opts.keepView) NM.map.reveal(hit.x, hit.y, sheetH);
+    const st = D.stations.find((s) => s.id === hit.id);
+    const stats = st && NM.store.latest(st.id, now);
+    if (!stats || !stats.ok) return;
+    selected = hit;
+    const top = stats.sources[0];
+    const sheetH = NM.sheet.show({
+      title: st.name,
+      db: stats.laeq,
+      bars: NM.store.hourly(st.id, now),
+      nowHour: T.hm(now).h,
+      desc: stats.stale ? `Offline since ${T.hhmm(stats.end)}` : top ? `Mostly ${SOURCE_LABEL[top[0]]?.toLowerCase() || top[0]}` : undefined,
+      detailsHtml: stationDetails(stats),
+      meta: `Sensor ${st.id} · ${T.hhmm(stats.start)}–${T.hhmm(stats.end)}` + (stats.flags.length ? ` · flagged: ${stats.flags.join(', ')}` : ''),
+    });
+    NM.map.select(hit);
+    if (!opts.keepView) NM.map.reveal(hit, sheetH);
   }
 
   function stationDetails(s) {
@@ -176,37 +147,7 @@
       ${sources ? `<ul class="sources" aria-label="Sound sources">${sources}</ul>` : ''}`;
   }
 
-  function nearestPlace(x, y, maxDist) {
-    let best = null;
-    for (const p of D.places) {
-      const d = Math.hypot(p.x - x, p.y - y);
-      if (!best || d < best.d) best = { d, p };
-    }
-    return best && best.d < maxDist ? best.p : null;
-  }
-
-  function placeName(x, y) {
-    const p = nearestPlace(x, y, 400);
-    return p ? `Near ${p.name}` : 'Selected spot';
-  }
-
-  function roadTitle(road, x, y) {
-    const p = nearestPlace(x, y, 400);
-    return p ? `${road.label} near ${p.name}` : road.label;
-  }
-
-  function onPick(it) {
-    if (it.type === 'station') return openHit({ type: 'station', id: it.station.id, x: it.station.x, y: it.station.y });
-    if (it.type === 'road') {
-      // The point of the street closest to the user (or to the middle of the map).
-      const ref = userPos || NM.map.center();
-      let best = null;
-      for (const road of it.roads) {
-        const c = U.polyClosest(ref.x, ref.y, road.pts);
-        if (!best || c.d2 < best.c.d2) best = { c, road };
-      }
-      return openHit({ type: 'road', road: best.road, x: best.c.x, y: best.c.y });
-    }
-    openHit({ type: 'point', x: it.place.x, y: it.place.y, name: it.place.name });
+  function onPick(st) {
+    openStation({ id: st.id, lon: st.lon, lat: st.lat });
   }
 })();

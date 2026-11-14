@@ -1,31 +1,18 @@
 #!/usr/bin/env python3
-"""
-Night-Noise Box — Linux Coordinator (python/main.py)
-----------------------------------------------------
-Connects:
-  1. Single config file (`python/config.py`) + persisted calibration JSON
-  2. Short-window audio monitor (`python/audio.py`, ~8 Hz, zero stored audio)
-  3. STM32 microcontroller (`sketch/sketch.ino`) via `arduino.app_utils.Bridge`
-  4. SQLite event & heatmap store (`python/store.py`)
-  5. Browser Web UI (`assets/index.html`) via `arduino.app_bricks.web_ui.WebUI`
+"""Entry point on the board. App Lab runs this file.
 
-Implements `/CONTRACT.md` strictly:
-  - Sends `set_thresholds(...)` on startup and whenever the profile switches
-    (`"night"` vs `"demo"`) without reflashing the sketch.
-  - Sends `level(db)` at ~8 Hz and `label(name, confidence)` only on label change.
-  - Microcontroller decides ONLY `event_start()` and `event_end(duration_ms)`,
-    and echoes `heartbeat()` once per second (`1 Hz`).
-  - Calibrates `CALIBRATION_OFFSET_DB = phone_reading - mean_raw_db_last_3s`
-    from the web page and saves `<db>.calibration.json` next to SQLite.
-  - Sends `live(level, raw_db, label)`, `event(record)`, `heatmap(data)`,
-    `diagnostics(...)`, and `csv_export(...)` to the browser.
+RUN_MODE in config.py picks what runs:
 
-Board runtime (Arduino App Lab):
-    python3 python/main.py
-    python3 python/main.py --source fake
+  analysis  Measure noise with the USB mic and upload a summary to the map
+            server every ANALYSIS_SECONDS (see analysis.py). The default.
 
-Laptop standalone run & self-test:
-    python3 python/main.py --source fake
+  events    The older pipeline. Linux sends loudness levels to the STM32,
+            the STM32 decides when a noise event starts and ends, and Linux
+            stores each event in SQLite and serves a heatmap page on port 7000.
+            Events can also be uploaded to the map server's /api/events.
+
+    python3 python/main.py                               # whatever RUN_MODE says
+    python3 python/main.py --mode events --source fake   # events page on a laptop
     python3 python/main.py --self-test
 """
 
@@ -70,16 +57,15 @@ from config import (  # noqa: E402
 from store import CSV_COLUMNS, NoiseStore  # noqa: E402
 from uploader import EventUploader  # noqa: E402
 
-WINDOW_INTERVAL_SEC: float = 1.0 / float(WINDOW_HZ)  # 0.125 s (~8 Hz)
-WOKE_LOOKBACK_SEC: float = 600.0                     # 10 minutes
-TAMPER_LATCH_SEC: float = 60.0                       # 60 seconds
-CALIBRATION_AVG_SEC: float = 3.0                     # 3-second rolling raw dBFS window
-MCU_HEARTBEAT_TIMEOUT_SEC: float = 3.0               # MCU considered responding if heartbeat <= 3s old
-DIAGNOSTICS_INTERVAL_SEC: float = 1.0                # 1 Hz diagnostics push
+WINDOW_INTERVAL_SEC: float = 1.0 / float(WINDOW_HZ)
+WOKE_LOOKBACK_SEC: float = 600.0  # a "woke me" press attaches to an event that ended this recently
+TAMPER_LATCH_SEC: float = 60.0  # events starting this soon after a tamper are flagged too
+CALIBRATION_AVG_SEC: float = 3.0
+MCU_HEARTBEAT_TIMEOUT_SEC: float = 3.0
+DIAGNOSTICS_INTERVAL_SEC: float = 1.0
 
-# ---------------------------------------------------------------------------
-# Hardware / Laptop Transport Adapters
-# ---------------------------------------------------------------------------
+# The arduino packages only exist on the board. Without them we run a local
+# HTTP server and simulate the STM32.
 try:
     from arduino.app_utils import App, Bridge  # type: ignore
     from arduino.app_bricks.web_ui import WebUI  # type: ignore
@@ -93,7 +79,7 @@ except ImportError:
 
 
 def default_calibration_path_for_db(db_path: Path | str) -> Optional[Path]:
-    """Returns `<db_stem>.calibration.json` next to the SQLite DB, or None for `:memory:`."""
+    """<db name>.calibration.json next to the database, or None for :memory:."""
     db_str = str(db_path)
     if db_str == ":memory:":
         return None
@@ -127,10 +113,7 @@ def save_calibration_atomic(cal_path: Optional[Path], offset_db: float, calibrat
 
 
 class LaptopDevWebUI:
-    """
-    Used ONLY when running on a laptop without `arduino.app_bricks.web_ui`.
-    On the UNO Q board, the official `WebUI` brick is used directly.
-    """
+    """Stand-in for the WebUI brick on a laptop. Pushes messages to the page over SSE."""
 
     def __init__(self, log_events: bool = True) -> None:
         self.handlers: Dict[str, Callable[..., None]] = {}
@@ -166,11 +149,7 @@ class LaptopDevWebUI:
 
 
 class BridgeSink:
-    """
-    Sends `level(db)`, `label(name, confidence)`, and `set_thresholds(...)`
-    from Linux to the STM32 microcontroller over `Bridge.notify`, or routes them
-    into `SketchNoiseSimulator` when running on a laptop without hardware.
-    """
+    """Sends level, label and thresholds to the STM32, or to the simulator on a laptop."""
 
     def __init__(self, verbose: bool = False) -> None:
         self.verbose = verbose
@@ -242,10 +221,9 @@ class BridgeSink:
             self._sim.rx_set_thresholds(t_ms, s_db, e_db, s_hold, e_hold)
 
 
-# ---------------------------------------------------------------------------
-# Night-Noise Coordinator (CONTRACT.md State Machine)
-# ---------------------------------------------------------------------------
 class NightNoiseCoordinator:
+    """Events mode: ties audio, the STM32, the database and the page together."""
+
     def __init__(
         self,
         audio: NightAudioMonitor,
@@ -272,7 +250,6 @@ class NightNoiseCoordinator:
         self._mono_fn = mono_fn if mono_fn is not None else time.monotonic
         self._lock = threading.RLock()
 
-        # Calibration offset (loaded from JSON next to SQLite if saved previously)
         self.calibration_offset_db: float = round(float(audio.calibration_offset_db), 1)
         self.calibrated_at: Optional[str] = None
         saved_cal = load_saved_calibration(self.calibration_path)
@@ -280,12 +257,10 @@ class NightNoiseCoordinator:
             self.calibration_offset_db, self.calibrated_at = saved_cal
             self.audio.set_calibration_offset(self.calibration_offset_db)
 
-        # Active threshold profile ("night" | "demo")
         self.active_profile: str = (
             default_profile if default_profile in PROFILES else "night"
         )
 
-        # Latest window state & 3-second rolling raw dBFS buffer
         self.current_raw_db: float = -59.0
         self.current_level_db: float = round(
             max(MIN_DB, min(MAX_DB, self.current_raw_db + self.calibration_offset_db)), 1
@@ -297,7 +272,7 @@ class NightNoiseCoordinator:
         self._last_heartbeat_mono: Optional[float] = None
         self._last_diag_mono: float = -999.0
 
-        # Open event state (controlled strictly by MCU event_start / event_end)
+        # The event currently open, between the STM32's event_start and event_end.
         self.event_open: bool = False
         self._open_start_iso: str = ""
         self._open_levels: List[float] = []
@@ -307,7 +282,6 @@ class NightNoiseCoordinator:
         self._open_woke_me: bool = False
         self._open_tamper: bool = False
 
-        # 60-second post-tamper latch
         self._tamper_until_mono: Optional[float] = None
 
         self._register_ui_handlers()
@@ -335,7 +309,7 @@ class NightNoiseCoordinator:
         self.ui.on_message("export_csv", self._wrap_ui_cb(self.handle_export_csv))
 
     def sync_startup_thresholds(self, sim_now_ms: Optional[int] = None) -> None:
-        """Sends the active threshold profile to the MCU on startup."""
+        """Sends the active threshold profile to the STM32."""
         with self._lock:
             prof = PROFILES[self.active_profile]
             self.bridge.notify_set_thresholds(
@@ -382,7 +356,7 @@ class NightNoiseCoordinator:
             vals = [v for _, v in self._raw_db_ring]
             return sum(vals) / len(vals)
 
-    # --- Browser Broadcasts (CONTRACT.md Section 5) ---
+    # --- Messages to the page ---
     def broadcast_live(self) -> None:
         self.ui.send_message(
             "live",
@@ -427,7 +401,7 @@ class NightNoiseCoordinator:
             self._last_diag_mono = self._mono_fn()
             self.ui.send_message("diagnostics", self.build_diagnostics_payload())
 
-    # --- Browser -> Linux Handlers (CONTRACT.md Section 6) ---
+    # --- Messages from the page ---
     def handle_request_state(self, _payload: Dict[str, Any]) -> None:
         with self._lock:
             self.broadcast_live()
@@ -489,7 +463,7 @@ class NightNoiseCoordinator:
                 },
             )
 
-    # --- ~8 Hz Audio Window Step ---
+    # --- Audio, called 8 times a second ---
     def step_once(
         self,
         injected_window: Optional[AudioWindow] = None,
@@ -520,7 +494,7 @@ class NightNoiseCoordinator:
                 self.broadcast_diagnostics()
             return win
 
-    # --- MCU -> Linux Handlers (CONTRACT.md Channel A2) ---
+    # --- Messages from the STM32 ---
     def on_mcu_event_start(self) -> None:
         now_mono = self._mono_fn()
         with self._lock:
@@ -632,21 +606,16 @@ class NightNoiseCoordinator:
             self._last_heartbeat_mono = self._mono_fn()
 
     def on_mcu_level(self, db: float) -> None:
-        """Optional `mcu_level(db)` receiver (unused by default)."""
+        """Level from a mic wired to the STM32. Not used with the USB mic."""
         self.audio.on_mcu_level(float(db))
 
     def on_mcu_knob(self, _value: int) -> None:
-        """No-op handler for legacy unused ModulinoKnob notifications."""
+        """The sketch reports knob turns. Ignored."""
         return
 
 
-# ---------------------------------------------------------------------------
-# Laptop End-to-End Self-Test & Local Server
-# ---------------------------------------------------------------------------
 def run_self_test() -> None:
     from sim_imu_replay import SketchNoiseSimulator
-
-    print("=== Phase 4 End-to-End Check: config, profiles, calibration persistence, diagnostics & CSV ===")
 
     sim_state = {"mono": 100.0, "dt": datetime(2026, 11, 14, 23, 10, 0), "ms": 0}
 
@@ -690,12 +659,12 @@ def run_self_test() -> None:
         coord.sync_startup_thresholds(sim_now_ms=sim_state["ms"])
         assert mcu_sim.active_start_db == 52.0 and mcu_sim.active_end_db == 45.0
 
-        # 1. Standalone woke_me BEFORE any event exists -> creates "unknown" record
+        # "Woke me" with no recent event creates a standalone "unknown" event.
         mcu_sim.press_woke_button(sim_state["ms"])
         ev_msgs = [p for ev, p in ui.sent_log if ev == "event"]
         assert len(ev_msgs) == 1 and ev_msgs[0]["label"] == "unknown" and ev_msgs[0]["woke_me"] is True
 
-        # 2. Mixed-label loud event under "night" profile (52 / 45 dB)
+        # A loud event with mixed labels under the night profile (52 / 45 dB).
         event_windows = [
             (35.0, "background", 0.95),
             (56.0, "voices", 0.80),
@@ -727,7 +696,7 @@ def run_self_test() -> None:
         traffic_ev = ev_msgs[-1]
         assert traffic_ev["label"] == "traffic"
 
-        # 3. Switch profile from page -> "demo" (70 / 62 dB); verify 62 dB NO LONGER triggers event_start
+        # Under the demo profile (70 / 62 dB), 62 dB must not start an event.
         ui.dispatch_from_client("set_profile", {"profile": "demo"})
         assert coord.active_profile == "demo"
         assert mcu_sim.active_start_db == 70.0 and mcu_sim.active_end_db == 62.0
@@ -738,12 +707,10 @@ def run_self_test() -> None:
         assert coord.event_open is False
         assert len([p for ev, p in ui.sent_log if ev == "event"]) == 2
 
-        # Switch back to "night"
         ui.dispatch_from_client("set_profile", {"profile": "night"})
         assert mcu_sim.active_start_db == 52.0
 
-        # 4. Calibrate from page: steady 40 dB nominal -> raw_db == -54.0 dBFS over 3 seconds (24 windows).
-        # Typing phone_db=50.0 -> new offset = 50.0 - (-54.0) = 104.0 dB, saved to JSON!
+        # Calibrate: 3 s of -54 dBFS and a phone reading of 50 dB gives an offset of 104 dB.
         audio.set_fake_sequence([(40.0, "background", 0.95)])
         for _ in range(24):
             advance_ms(125)
@@ -752,7 +719,6 @@ def run_self_test() -> None:
         assert abs(coord.calibration_offset_db - 104.0) <= 0.2
         assert cal_file.exists(), "Calibration JSON file must be written next to SQLite DB"
 
-        # Verify Diagnostics payload reports MCU heartbeat OK, events stored, DB size & calibration
         diag_msgs = [p for ev, p in ui.sent_log if ev == "diagnostics"]
         assert diag_msgs, "Expected diagnostics messages"
         latest_diag = diag_msgs[-1]
@@ -761,7 +727,6 @@ def run_self_test() -> None:
         assert latest_diag["db_size_bytes"] > 0
         assert latest_diag["calibrated_at"] is not None
 
-        # Verify CSV export contains only event records
         ui.dispatch_from_client("export_csv", {})
         csv_msgs = [p for ev, p in ui.sent_log if ev == "csv_export"]
         assert len(csv_msgs) == 1
@@ -772,7 +737,7 @@ def run_self_test() -> None:
         store.close()
         audio.close()
 
-        # 5. Restart coordinator on same DB path -> calibration offset MUST persist!
+        # The calibration survives a restart.
         audio_restarted = NightAudioMonitor(use_fake=True, calibration_offset_db=CALIBRATION_OFFSET_DB)
         store_restarted = NoiseStore(db_path=db_file, retention_days=RETENTION_DAYS, grid_cell=GRID_CELL)
         ui_restarted = LaptopDevWebUI(log_events=False)
@@ -791,11 +756,11 @@ def run_self_test() -> None:
         store_restarted.close()
         audio_restarted.close()
 
-    print("=== PASS: Profiles, 3s calibration + JSON restart persistence, diagnostics & CSV verified ===")
+    print("main self-test passed")
 
 
 def verify_audio_source_ready(audio: NightAudioMonitor) -> None:
-    """Fails immediately with a clear message when `--source live` hits TODO(BOARD-CHECK)."""
+    """Exit with a clear message if live audio isn't implemented yet."""
     if not audio.use_fake:
         try:
             audio.read_window()
@@ -815,7 +780,7 @@ def make_uploader(upload_url: str) -> Optional[EventUploader]:
 def run_laptop_dev_server(
     port: int, db_path: str, source_mode: str, sim_buttons: bool, upload_url: str = UPLOAD_URL
 ) -> None:
-    """Serves `assets/index.html`, `/api/events` SSE, `/api/cmd`, and `/export.csv` on a laptop."""
+    """Events mode on a laptop: serves the page, SSE at /api/events, /api/cmd and /export.csv."""
     from sim_imu_replay import SketchNoiseSimulator
 
     audio = NightAudioMonitor(
@@ -839,7 +804,7 @@ def run_laptop_dev_server(
     )
     bridge.attach_laptop_simulator(mcu_sim)
     coord.sync_startup_thresholds(sim_now_ms=0)
-    mcu_sim.tick(0)  # Emit initial startup heartbeat
+    mcu_sim.tick(0)
 
     stop_event = threading.Event()
 
@@ -946,7 +911,7 @@ def run_laptop_dev_server(
 
 
 def run_uno_q_board(source_mode: str, db_path: str, upload_url: str = UPLOAD_URL) -> None:
-    """Production entry point on Arduino UNO Q inside Arduino App Lab."""
+    """Events mode on the board."""
     audio = NightAudioMonitor(
         use_fake=(source_mode == "fake"),
         calibration_offset_db=CALIBRATION_OFFSET_DB,
@@ -960,14 +925,13 @@ def run_uno_q_board(source_mode: str, db_path: str, upload_url: str = UPLOAD_URL
         audio=audio, store=store, ui=web_ui, bridge=bridge, uploader=make_uploader(upload_url)
     )
 
-    # Register MCU -> Linux RPC notifications (CONTRACT.md Channel A2)
     Bridge.provide("event_start", coord.on_mcu_event_start)
     Bridge.provide("event_end", coord.on_mcu_event_end)
     Bridge.provide("woke_me", coord.on_mcu_woke_me)
     Bridge.provide("tamper", coord.on_mcu_tamper)
     Bridge.provide("heartbeat", coord.on_mcu_heartbeat)
-    Bridge.provide("mcu_level", coord.on_mcu_level)  # Optional candidate (c), unused by default
-    Bridge.provide("knob", coord.on_mcu_knob)        # Legacy unused Knob no-op
+    Bridge.provide("mcu_level", coord.on_mcu_level)
+    Bridge.provide("knob", coord.on_mcu_knob)
 
     def audio_window_loop() -> None:
         time.sleep(0.5)
@@ -985,7 +949,7 @@ def run_uno_q_board(source_mode: str, db_path: str, upload_url: str = UPLOAD_URL
 
 
 def run_analysis_mode(db_path: str, readings_url: str, mic_kind: Optional[str] = None) -> None:
-    """RUN_MODE="analysis": listen -> analyse ANALYSIS_SECONDS -> upload v1 summary, forever."""
+    """Analysis mode. On the board the STM32 still gets levels for its LED bar."""
     from analysis import build_analyzer, run_forever
     from config import MIC_SOURCE
 
@@ -993,7 +957,7 @@ def run_analysis_mode(db_path: str, readings_url: str, mic_kind: Optional[str] =
     offset = saved[0] if saved is not None else CALIBRATION_OFFSET_DB
     on_level = None
     if ON_UNO_Q and Bridge is not None:
-        # Keep the STM32's LED bar + watchdog fed; its event messages are ignored in this mode.
+        # The sketch still sends these; nothing uses them in this mode.
         for name in ("event_start", "event_end", "woke_me", "tamper", "heartbeat", "mcu_level", "knob"):
             Bridge.provide(name, lambda *_a: None)
         on_level = lambda db: Bridge.notify("level", db)  # noqa: E731
@@ -1007,14 +971,14 @@ def run_analysis_mode(db_path: str, readings_url: str, mic_kind: Optional[str] =
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="UNO Q Night-Noise Box Linux Coordinator")
+    parser = argparse.ArgumentParser(description="Night-Noise Box")
     parser.add_argument(
         "--source",
         choices=("fake", "live"),
         default=None,
         help=f"Audio source mode overriding config.py (default from config.py: {AUDIO_SOURCE!r})",
     )
-    parser.add_argument("--self-test", action="store_true", help="Run end-to-end verification suite")
+    parser.add_argument("--self-test", action="store_true", help="Run the events-mode self-test")
     parser.add_argument("--laptop-server", action="store_true", help="Force laptop HTTP/SSE server mode")
     parser.add_argument("--port", type=int, default=7000, help="Laptop HTTP/SSE port (default 7000)")
     parser.add_argument("--db", type=str, default=str(THIS_DIR / "night_noise.sqlite3"), help="SQLite DB path")

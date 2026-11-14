@@ -1,23 +1,17 @@
 #!/usr/bin/env python3
-"""
-Night-Noise Box — Microphone capture (python/mic.py)
-----------------------------------------------------
-Reads 16-bit mono PCM from the USB camera's microphone on the UNO Q Linux side.
+"""Reads 16-bit mono audio from the USB mic.
 
-Backend: `arecord` (alsa-utils, present on the UNO Q Debian image) writing raw
-PCM to a pipe that we read straight into a caller-owned fixed-size
-`array('h')` buffer. Nothing touches disk; the pipe is the only transport.
-`plughw:` lets ALSA resample/downmix so we always get the rate the model wants.
+`arecord` streams raw samples through a pipe straight into the caller's
+buffer, so nothing is written to disk. `plughw:` makes ALSA resample to
+whatever rate the model needs.
 
-`MIC_DEVICE = "auto"` picks the first ALSA capture card that looks like a USB
-camera / USB audio device (see `arecord -l`). Set an explicit device such as
-`"plughw:CARD=Camera,DEV=0"` in config.py if auto-detection picks the wrong one.
+MIC_DEVICE = "auto" picks the first capture card that looks like a USB mic or
+camera. If it picks the wrong one, set e.g. "plughw:1,0" in config.py.
 
-    python3 python/mic.py --list          # show capture devices + what "auto" picks
-    python3 python/mic.py --seconds 3     # print live dBFS for 3 s (no audio kept)
+    python3 python/mic.py --list         # capture devices and what "auto" picks
+    python3 python/mic.py --seconds 3    # print live dBFS
 
-`SyntheticMic` produces a test signal so the analysis pipeline can be run on a
-laptop without ALSA.
+SyntheticMic generates a test signal for running on a laptop.
 """
 
 from __future__ import annotations
@@ -41,14 +35,14 @@ class MicSource(Protocol):
     device_name: str
 
     def read_into(self, buf: "array.array[int]") -> bool:
-        """Fills `buf` completely with int16 samples. Returns False on dropout/EOF."""
+        """Fills `buf` with samples. Returns False if the mic dropped out."""
         ...
 
     def close(self) -> None: ...
 
 
 def list_capture_cards() -> List[Tuple[int, int, str]]:
-    """Returns `(card, device, description)` for every ALSA capture device."""
+    """(card, device, description) for each ALSA capture device."""
     if shutil.which("arecord") is None:
         return []
     try:
@@ -64,7 +58,7 @@ def list_capture_cards() -> List[Tuple[int, int, str]]:
 
 
 def resolve_device(device: str) -> str:
-    """Turns `"auto"` into a concrete `plughw:<card>,<dev>`; passes anything else through."""
+    """Turns "auto" into plughw:<card>,<dev>. Other values are returned unchanged."""
     if device != "auto":
         return device
     cards = list_capture_cards()
@@ -78,8 +72,6 @@ def resolve_device(device: str) -> str:
 
 
 class ArecordMic:
-    """Streams S16_LE mono PCM from `arecord` through a pipe (never a file)."""
-
     def __init__(self, device: str = "auto", sample_rate: int = 16000) -> None:
         if shutil.which("arecord") is None:
             raise RuntimeError("`arecord` not found (install alsa-utils) — use --mic synthetic on a laptop")
@@ -133,7 +125,7 @@ class ArecordMic:
 
 
 class SyntheticMic:
-    """Laptop stand-in: quiet noise floor with an occasional louder tone burst, paced in real time."""
+    """Quiet noise with a 2 s tone burst every 6 s."""
 
     def __init__(self, sample_rate: int = 16000, realtime: bool = True, seed: int = 1) -> None:
         self.sample_rate = int(sample_rate)
@@ -147,7 +139,7 @@ class SyntheticMic:
         sr = self.sample_rate
         for i in range(len(buf)):
             t = self._t + i
-            burst = (t // sr) % 6 in (2, 3)  # 2 s of tone every 6 s
+            burst = (t // sr) % 6 in (2, 3)
             amp = 6000.0 if burst else 0.0
             s = amp * math.sin(2 * math.pi * 220.0 * t / sr) + self._rng.gauss(0.0, 120.0)
             buf[i] = max(-32768, min(32767, int(s)))

@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
-"""
-Standalone laptop simulator & verifier for `sketch/sketch.ino`.
-Mirrors the exact named threshold constants, runtime `set_thresholds(...)`
-profile updates, hysteresis hold times, 2-second signal watchdog, 1-second
-`heartbeat()`, 8-LED loudness bar, `woke_me()` button debounce, and ~20 Hz
-IMU `tamper()` logic on the microcontroller.
+"""Python copy of the event logic in sketch/sketch.ino, for testing without a board.
 
-Also imported by `python/main.py` when running on a laptop without a UNO Q board
-so `main.py` exercises the real MCU <-> Linux `CONTRACT.md` boundary.
+main.py uses it in place of the STM32 when running on a laptop. Keep the
+constants and logic in sync with the sketch.
 
-Run standalone:
-    python3 python/sim_imu_replay.py
+    python3 python/sim_imu_replay.py    # self-test
 """
 
 from __future__ import annotations
@@ -18,7 +12,7 @@ from __future__ import annotations
 import math
 from typing import Callable, List, Optional, Tuple
 
-# Exact default constants from top of `sketch/sketch.ino`
+# Same values as the top of sketch.ino
 START_THRESHOLD_DB: float = 52.0
 END_THRESHOLD_DB: float = 45.0
 START_HOLD_MS: int = 375
@@ -30,7 +24,7 @@ LEVEL_BAR_MIN_DB: float = 30.0
 LEVEL_BAR_MAX_DB: float = 78.0
 NUM_PIXELS: int = 8
 
-IMU_INTERVAL_MS: int = 50  # ~20 Hz
+IMU_INTERVAL_MS: int = 50
 WOKE_DEBOUNCE_MS: int = 200
 TAMPER_DEBOUNCE_MS: int = 1000
 GRAVITY_EMA_ALPHA: float = 0.15
@@ -54,7 +48,7 @@ def level_db_to_lit_leds(db: float) -> int:
 
 
 class SketchNoiseSimulator:
-    """Exact host twin of `sketch/sketch.ino`."""
+    """Mirrors the sketch's state. Callbacks stand in for Bridge.notify."""
 
     def __init__(
         self,
@@ -70,7 +64,7 @@ class SketchNoiseSimulator:
         self._cb_tamper = on_tamper
         self._cb_heartbeat = on_heartbeat
 
-        # Runtime thresholds (initialized from defaults; updated via rx_set_thresholds)
+        # Changed by rx_set_thresholds
         self.active_start_db: float = START_THRESHOLD_DB
         self.active_end_db: float = END_THRESHOLD_DB
         self.active_start_hold_ms: int = START_HOLD_MS
@@ -121,7 +115,7 @@ class SketchNoiseSimulator:
         else:
             self.pixels_mode = f"bar_{level_db_to_lit_leds(self.current_level_db)}"
 
-    # --- Linux -> MCU RPC receivers ---
+    # --- Messages from Linux ---
     def rx_level(self, now_ms: int, db: float) -> None:
         self.current_level_db = clampf(float(db), 0.0, 120.0)
         self.has_signal = True
@@ -149,7 +143,7 @@ class SketchNoiseSimulator:
         self.above_start_armed = False
         self.below_end_armed = False
 
-    # --- Periodic MCU loop / Heartbeat / Watchdog / Hysteresis ---
+    # --- Main loop ---
     def tick(self, now_ms: int) -> None:
         if (
             self.last_heartbeat_ms is None
@@ -201,7 +195,7 @@ class SketchNoiseSimulator:
 
         self._refresh_pixels()
 
-    # --- Physical Inputs on MCU ---
+    # --- Button and IMU ---
     def press_woke_button(self, now_ms: int) -> None:
         if self.last_woke_ms is None or (now_ms - self.last_woke_ms) >= WOKE_DEBOUNCE_MS:
             self.last_woke_ms = now_ms
@@ -227,32 +221,31 @@ class SketchNoiseSimulator:
 
 
 def run_self_test() -> None:
-    print("=== Sketch Check: Hysteresis, set_thresholds, 1Hz Heartbeat, Watchdog, Woke & Tamper ===")
     sim = SketchNoiseSimulator()
-    assert sim.pixels_mode == "no_signal", "Must start in no_signal pattern before first level(db)"
+    assert sim.pixels_mode == "no_signal"
 
-    # 1. Default "night" profile (52 / 45 dB): quiet -> loud (>=52 dB) -> hysteresis middle -> quiet
+    # Night profile (52 / 45 dB)
     trace = [
         (0, 35.0),
         (125, 36.0),
-        (250, 55.0),   # arms above_start at 250 ms
+        (250, 55.0),   # above start threshold from here
         (375, 58.0),
         (500, 62.0),
-        (625, 64.0),   # 625 - 250 = 375 ms >= START_HOLD_MS -> event_start!
-        (750, 48.5),   # between END (45) and START (52): hysteresis MUST keep event open!
+        (625, 64.0),   # held for 375 ms: event_start
+        (750, 48.5),   # between the thresholds, so the event stays open
         (875, 56.0),
-        (1000, 42.0),  # arms below_end at 1000 ms (and emits 1s heartbeat)
+        (1000, 42.0),  # below end threshold from here
         (1125, 40.0),
         (1250, 38.0),
         (1375, 36.0),
         (1500, 35.0),
-        (1625, 35.0),  # 1625 - 1000 = 625 ms >= END_HOLD_MS -> event_end(1000 ms)!
+        (1625, 35.0),  # held for 625 ms: event_end(1000)
     ]
     for t_ms, db in trace:
         sim.rx_level(t_ms, db)
         if t_ms == 750:
             sim.press_woke_button(750)
-            sim.press_woke_button(830)  # < 200 ms bounce -> rejected
+            sim.press_woke_button(830)  # within the debounce time, ignored
 
     assert ("event_start", None) in [(e[1], e[2]) for e in sim.events], "Expected event_start"
     ends = [e for e in sim.events if e[1] == "event_end"]
@@ -261,7 +254,7 @@ def run_self_test() -> None:
     assert len(wokes) == 1, f"Expected 1 debounced woke_me, got {wokes}"
     assert sim.heartbeat_count >= 2, f"Expected >=2 heartbeats (t=0, t=1000), got {sim.heartbeat_count}"
 
-    # 2. Verify ~20 Hz (50 ms) IMU tamper detection + debounce
+    # Tilting the box triggers one tamper.
     sim.step_imu(1700, 0.0, 0.0, 1.0)
     sim.step_imu(1750, 0.0, 0.0, 1.0)
     sim.step_imu(1800, 0.45, 0.0, 1.35)
@@ -269,33 +262,31 @@ def run_self_test() -> None:
     tampers = [e for e in sim.events if e[1] == "tamper"]
     assert len(tampers) == 1, f"Expected 1 debounced tamper, got {tampers}"
 
-    # 3. Verify 2-second watchdog closes an open event and sets pixels_mode = "no_signal"
+    # 2 s without a level closes the open event and shows "no signal".
     sim.rx_level(2000, 60.0)
     sim.rx_level(2200, 61.0)
-    sim.rx_level(2400, 62.0)  # event_start at 2400 ms
+    sim.rx_level(2400, 62.0)
     assert sim.event_open is True and sim.pixels_mode.startswith("bar_")
-    sim.tick(4450)  # > 2000 ms without rx_level -> watchdog trips!
+    sim.tick(4450)
     assert sim.event_open is False
     assert sim.pixels_mode == "no_signal"
     ends_after_wd = [e for e in sim.events if e[1] == "event_end"]
     assert len(ends_after_wd) == 2 and ends_after_wd[1][2] == 2050
 
-    # 4. Verify runtime set_thresholds("demo": 70 / 62 dB) switches behaviour without reflashing!
+    # Demo profile (70 / 62 dB): 62 dB no longer starts an event, 74 dB does.
     sim.rx_set_thresholds(5000, 70.0, 62.0, 375, 625)
     starts_before_demo = len([e for e in sim.events if e[1] == "event_start"])
-    # 62 dB would have triggered under "night" (52 dB), MUST NOT trigger under "demo" (70 dB)
     for idx in range(6):
         sim.rx_level(5000 + idx * 125, 62.0)
     assert len([e for e in sim.events if e[1] == "event_start"]) == starts_before_demo
     assert sim.event_open is False
 
-    # 74 dB >= 70 dB for >= 375 ms -> MUST trigger event_start under "demo", and <= 62 dB ends it
     for idx in range(5):
         sim.rx_level(6000 + idx * 125, 74.0)
     assert sim.event_open is True
     assert len([e for e in sim.events if e[1] == "event_start"]) == starts_before_demo + 1
     for idx in range(6):
-        sim.rx_level(6625 + idx * 125, 58.0)  # <= 62 dB for 625 ms -> event_end!
+        sim.rx_level(6625 + idx * 125, 58.0)
     assert sim.event_open is False
 
     for t_ms, name, arg in sim.events:
@@ -303,7 +294,7 @@ def run_self_test() -> None:
             continue
         arg_str = "" if arg is None else str(arg)
         print(f"[{t_ms:5d} ms] Bridge TX -> {name}({arg_str})")
-    print("=== PASS: Hysteresis, set_thresholds profile switch, 1Hz heartbeat, woke_me, tamper & watchdog verified ===")
+    print("sketch simulator self-test passed")
 
 
 if __name__ == "__main__":

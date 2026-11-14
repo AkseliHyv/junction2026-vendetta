@@ -1,26 +1,11 @@
 #!/usr/bin/env python3
-"""
-Night-Noise Box — Short-Window Loudness & Acoustic Label Reader (python/audio.py)
----------------------------------------------------------------------------------
-Contract invariants (see /CONTRACT.md):
-  - Produces `(level_db, label, confidence)` once per ~125 ms window (~8 Hz),
-    alongside uncalibrated `raw_db` (`dBFS`) for live calibration.
-  - Audio samples live ONLY in a fixed-size `array('h')` buffer allocated once in
-    RAM and overwritten in place on every window.
-  - Never writes audio to disk, never sends audio anywhere, never logs samples.
-  - Default `CALIBRATION_OFFSET_DB` comes from `python/config.py` and can be
-    updated live at runtime from the web page.
+"""Audio input for events mode: one (level_db, label, confidence) every 125 ms.
 
-Pluggable Source Architecture:
-  `LiveAudioSource` is a single small class with one method:
-      read_window() -> tuple[float, str, float]   # (level_db, label, confidence)
-  No live audio code is written yet (`TODO(BOARD-CHECK)`). On the UNO Q board,
-  drop in whichever of the three candidate backends works cleanly:
-    (a) `AudioClassification` brick for labels + shared `Microphone` for RMS level,
-    (b) custom `Microphone` loop overwriting `_pcm_buf` + Edge Impulse runner, or
-    (c) `AudioClassification` brick for labels + `mcu_level(db)` from the STM32.
+FakeAudioSource replays a scripted night (traffic, voices, construction,
+music) so events mode can run on a laptop or on the board without a mic.
+LiveAudioSource is not implemented; analysis mode (analysis.py, mic.py) is
+where the real USB mic is used.
 
-Laptop check:
     python3 python/audio.py --self-test
     python3 python/audio.py --steps 16
 """
@@ -41,14 +26,11 @@ if str(THIS_DIR) not in sys.path:
 
 from config import AUDIO_SOURCE, CALIBRATION_OFFSET_DB  # noqa: E402
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 SAMPLE_RATE_HZ: int = 16000
 WINDOW_HZ: int = 8
-WINDOW_SAMPLES: int = SAMPLE_RATE_HZ // WINDOW_HZ  # 2000 int16 samples = 125 ms
+WINDOW_SAMPLES: int = SAMPLE_RATE_HZ // WINDOW_HZ
 
-# Baseline offset for interpreting nominal levels in DEFAULT_FAKE_SEQUENCE as dBFS
+# The levels in DEFAULT_FAKE_SEQUENCE are in dB assuming this calibration offset.
 FAKE_NOMINAL_REF_OFFSET_DB: float = 94.0
 
 MIN_DB: float = 0.0
@@ -63,12 +45,10 @@ ALLOWED_LABELS: Tuple[str, ...] = (
     "background",
 )
 
-# Realistic ~8 Hz fake night sequence (nominal dB at default 94.0 dB offset):
-#   quiet -> traffic -> quiet -> voices -> quiet -> construction -> quiet -> music
+# One window per entry. Each loud stretch is long enough to open an event under
+# the night profile, and each quiet stretch long enough to close it.
 DEFAULT_FAKE_SEQUENCE: List[Tuple[float, str, float]] = [
-    # Quiet baseline (~35 dB, below END_THRESHOLD_DB=45)
     *[(34.8, "background", 0.94)] * 4,
-    # Passing heavy vehicle ("traffic", 12 windows = 1.5 s >= 52 dB)
     (55.0, "traffic", 0.82),
     (59.5, "traffic", 0.87),
     (63.0, "traffic", 0.90),
@@ -81,9 +61,7 @@ DEFAULT_FAKE_SEQUENCE: List[Tuple[float, str, float]] = [
     (58.8, "traffic", 0.86),
     (56.4, "traffic", 0.84),
     (54.2, "traffic", 0.82),
-    # Quiet return (6 windows = 0.75 s <= 45 dB -> closes event cleanly)
     *[(35.0, "background", 0.94)] * 6,
-    # Late-night street voices ("voices", 11 windows = 1.375 s >= 52 dB)
     (54.2, "voices", 0.82),
     (56.8, "voices", 0.86),
     (58.5, "voices", 0.89),
@@ -95,9 +73,7 @@ DEFAULT_FAKE_SEQUENCE: List[Tuple[float, str, float]] = [
     (56.5, "voices", 0.86),
     (55.4, "voices", 0.85),
     (53.8, "voices", 0.83),
-    # Quiet return
     *[(34.9, "background", 0.95)] * 6,
-    # Utility / roadwork ("construction", 11 windows = 1.375 s >= 52 dB)
     (58.0, "construction", 0.85),
     (62.5, "construction", 0.89),
     (66.8, "construction", 0.92),
@@ -109,9 +85,7 @@ DEFAULT_FAKE_SEQUENCE: List[Tuple[float, str, float]] = [
     (63.2, "construction", 0.90),
     (60.8, "construction", 0.88),
     (58.5, "construction", 0.86),
-    # Quiet return
     *[(35.1, "background", 0.94)] * 6,
-    # Distant bass / bar music ("music", 11 windows = 1.375 s >= 52 dB)
     (53.6, "music", 0.80),
     (56.4, "music", 0.85),
     (59.0, "music", 0.88),
@@ -123,14 +97,12 @@ DEFAULT_FAKE_SEQUENCE: List[Tuple[float, str, float]] = [
     (57.0, "music", 0.86),
     (55.8, "music", 0.85),
     (54.0, "music", 0.83),
-    # Quiet return
     *[(35.0, "background", 0.95)] * 6,
 ]
 
 
 @dataclass(frozen=True)
 class AudioWindow:
-    """Scalar-only window output; never carries PCM audio samples."""
 
     level_db: float
     label: str
@@ -139,15 +111,14 @@ class AudioWindow:
 
 
 class AudioWindowSource(Protocol):
-    """Single-method interface shared by `LiveAudioSource` and `FakeAudioSource`."""
 
     def read_window(self) -> Tuple[float, str, float]:
-        """Returns `(level_db, label, confidence)` for one ~125 ms window."""
+        """(level_db, label, confidence) for one 125 ms window."""
         ...
 
 
 def normalize_label(raw_label: str) -> str:
-    """Maps Edge Impulse model class strings onto the 5 canonical contract labels."""
+    """Maps model class names onto ALLOWED_LABELS."""
     cleaned = raw_label.strip().lower()
     if cleaned in ALLOWED_LABELS:
         return cleaned
@@ -155,32 +126,21 @@ def normalize_label(raw_label: str) -> str:
 
 
 def rms_norm_to_raw_dbfs(rms_norm: float) -> float:
-    """Converts normalized RMS amplitude in [0.0, 1.0] to uncalibrated dBFS (<= 0.0)."""
+    """RMS in [0, 1] to dBFS."""
     safe_rms = max(rms_norm, 1e-6)
     raw_dbfs = 20.0 * math.log10(min(1.0, safe_rms))
     return round(max(MIN_RAW_DBFS, min(0.0, raw_dbfs)), 1)
 
 
 def rms_norm_to_db(rms_norm: float, calibration_offset_db: float = CALIBRATION_OFFSET_DB) -> float:
-    """Converts normalized RMS amplitude in [0.0, 1.0] to calibrated dB."""
+    """RMS in [0, 1] to calibrated dB."""
     raw_dbfs = rms_norm_to_raw_dbfs(rms_norm)
     db = raw_dbfs + float(calibration_offset_db)
     return round(max(MIN_DB, min(MAX_DB, db)), 1)
 
 
-# ---------------------------------------------------------------------------
-# Pluggable Sources: Live Board Stub vs. Laptop Fake Input
-# ---------------------------------------------------------------------------
 class LiveAudioSource:
-    """
-    Drop-in hardware source for the Arduino UNO Q.
-    Exposes a single method `read_window() -> (level_db, label, confidence)` so
-    whichever board pipeline passes physical testing can be plugged in here
-    without touching `NightAudioMonitor` or `python/main.py`:
-      (a) `AudioClassification` brick for labels + shared `Microphone` into `_pcm_buf`,
-      (b) our own `Microphone` loop overwriting `_pcm_buf` + Edge Impulse `.eim` runner,
-      (c) `AudioClassification` brick for labels + `mcu_level(db)` via `latest_mcu_db`.
-    """
+    """Placeholder for a real mic in events mode. Implement read_window() to use it."""
 
     def __init__(self, calibration_offset_db: float = CALIBRATION_OFFSET_DB) -> None:
         self.calibration_offset_db = float(calibration_offset_db)
@@ -189,24 +149,16 @@ class LiveAudioSource:
         self.last_raw_db: float = -60.0
 
     def read_window(self) -> Tuple[float, str, float]:
-        # TODO(BOARD-CHECK): Implement live UNO Q window acquisition after testing on
-        # hardware which of (a) AudioClassification + shared Microphone,
-        # (b) Microphone -> _pcm_buf -> Edge Impulse runner, or
-        # (c) AudioClassification labels + optional `mcu_level(db)` from STM32
-        # provides simultaneous level_db and label without writing audio to disk.
+        # TODO: read a 125 ms block (e.g. with mic.ArecordMic) and classify it.
         raise NotImplementedError(
-            "AUDIO_SOURCE='live' is not yet active: LiveAudioSource.read_window() "
-            "requires physical UNO Q microphone + AudioClassification brick verification "
-            "(see TODO(BOARD-CHECK) in python/audio.py). Run with --source fake meanwhile."
+            "Live audio is not implemented for events mode. Use --source fake, "
+            "or RUN_MODE = \"analysis\" for the real mic."
         )
 
 
 class FakeAudioSource:
-    """
-    Deterministic fake source returning `(level_db, label, confidence)` per
-    window while exercising the fixed-size overwritten `_pcm_buf`, raw `dBFS`
-    measurement, and live `calibration_offset_db` adjustment.
-    """
+    """Plays DEFAULT_FAKE_SEQUENCE on a loop. Each window is synthesised into a
+    real buffer and measured, so calibration behaves like it would with a mic."""
 
     def __init__(
         self,
@@ -214,8 +166,6 @@ class FakeAudioSource:
         calibration_offset_db: float = CALIBRATION_OFFSET_DB,
     ) -> None:
         self.calibration_offset_db = float(calibration_offset_db)
-        # Single fixed-size PCM buffer in RAM (2000 x int16 = 4000 bytes),
-        # overwritten in place every window; never resized, copied out, or logged.
         self._pcm_buf: array.array[int] = array.array("h", [0] * WINDOW_SAMPLES)
         self._items: List[Tuple[float, str, float]] = list(
             sequence if sequence is not None else DEFAULT_FAKE_SEQUENCE
@@ -266,10 +216,7 @@ class FakeAudioSource:
 
 
 class NightAudioMonitor:
-    """
-    Normalizes `(level_db, label, confidence)` + `raw_db` (`dBFS`) from either
-    `FakeAudioSource` or `LiveAudioSource` into contract-compliant `AudioWindow` values.
-    """
+    """Reads windows from the fake or live source and clamps them to valid values."""
 
     def __init__(
         self,
@@ -298,7 +245,6 @@ class NightAudioMonitor:
             self._source = self._live_source
 
     def set_calibration_offset(self, offset_db: float) -> None:
-        """Updates `CALIBRATION_OFFSET_DB` at runtime without restarting."""
         val = round(float(offset_db), 1)
         self.calibration_offset_db = val
         if self._fake_source is not None:
@@ -307,7 +253,7 @@ class NightAudioMonitor:
             self._live_source.calibration_offset_db = val
 
     def on_mcu_level(self, db: float) -> None:
-        """Optional hook for candidate (c) (`mcu_level(db)` from STM32); unused by default."""
+        """Level from a mic wired to the STM32. Not used."""
         if self._live_source is not None:
             self._live_source.latest_mcu_db = max(MIN_DB, min(MAX_DB, float(db)))
 
@@ -341,11 +287,7 @@ class NightAudioMonitor:
                 self._live_source._pcm_buf[i] = 0
 
 
-# ---------------------------------------------------------------------------
-# Laptop Verification CLI & Self-Test
-# ---------------------------------------------------------------------------
 def run_self_test() -> None:
-    print("=== Audio Check: python/audio.py (Config, Pluggable Source, dBFS & Fixed Buffer) ===")
     mon = NightAudioMonitor(use_fake=True)
     assert mon._fake_source is not None
     initial_buf_id = id(mon._fake_source._pcm_buf)
@@ -360,16 +302,15 @@ def run_self_test() -> None:
         assert w.raw_db <= 0.0
         assert abs((w.raw_db + mon.calibration_offset_db) - w.level_db) <= 0.2
 
-    # Verify live runtime calibration shifts level_db while raw_db stays anchored to physical signal
+    # Changing the calibration moves level_db but not raw_db.
     mon.set_fake_sequence([(50.0, "traffic", 0.90)])
     w_before = mon.read_window()
     assert abs(w_before.raw_db - (-44.0)) <= 0.2 and abs(w_before.level_db - 50.0) <= 0.2
-    mon.set_calibration_offset(104.0)  # +10 dB higher offset
+    mon.set_calibration_offset(104.0)
     w_after = mon.read_window()
     assert abs(w_after.raw_db - w_before.raw_db) <= 0.1
     assert abs(w_after.level_db - 60.0) <= 0.2
 
-    # Verify custom single-method source drop-in compatibility
     class DummyDropInSource:
         def read_window(self) -> Tuple[float, str, float]:
             return (62.4, "construction", 0.91)
@@ -378,7 +319,6 @@ def run_self_test() -> None:
     dw = drop_in_mon.read_window()
     assert dw.level_db == 62.4 and dw.label == "construction" and dw.confidence == 0.91
 
-    # Verify LiveAudioSource raises clear NotImplementedError until board test
     live_mon = NightAudioMonitor(use_fake=False)
     live_mon.on_mcu_level(51.2)
     assert live_mon._live_source is not None and live_mon._live_source.latest_mcu_db == 51.2
@@ -386,10 +326,10 @@ def run_self_test() -> None:
         live_mon.read_window()
         raise AssertionError("Expected LiveAudioSource.read_window() to raise NotImplementedError")
     except NotImplementedError as exc:
-        assert "TODO(BOARD-CHECK)" in str(exc)
+        assert "not implemented" in str(exc)
 
     mon.close()
-    print("=== PASS: Single-method source, raw dBFS & runtime calibration verified ===")
+    print("audio self-test passed")
 
 
 def main() -> None:

@@ -1,14 +1,13 @@
-/* Demo feed: synthesises device payloads in the exact Arduino format so the map
- * runs without a backend. Each station emits one payload per completed
- * 15-minute window (15 per-minute readings). Values are deterministic per
- * station and minute, so reloading shows the same history.
+/* Demo feed for ?demo: made-up payloads in the same format the boxes send.
+ * Each station sends one payload per 15 minutes with 15 one-minute readings.
+ * Values depend only on station and minute, so reloading shows the same history.
  */
 window.NM = window.NM || {};
 
 NM.mock = (function () {
   const T = NM.time, U = NM.util;
 
-  // Per-station character: level bias vs. the model (dB) and source mix.
+  // Per station: dB added to the daily curve, and the mix of sources.
   const CHARACTER = {
     'otaniemi-01': { bias: () => -1, mix: { traffic: 0.45, voices: 0.3, nature: 0.17, construction: 0.08 } },
     'otaniemi-02': { bias: () => -3, mix: { nature: 0.55, voices: 0.25, traffic: 0.18, construction: 0.02 } },
@@ -41,6 +40,13 @@ NM.mock = (function () {
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
   }
+  // Typical level by hour: quiet at night, peaks in the morning and afternoon rush.
+  const DAILY_DB = [44, 42, 41, 41, 42, 46, 52, 57, 58, 56, 55, 55, 55, 55, 56, 57, 58, 58, 56, 53, 51, 49, 47, 45];
+  const dailyDb = (hf) => {
+    const h = Math.floor(hf) % 24;
+    return U.lerp(DAILY_DB[h], DAILY_DB[(h + 1) % 24], hf - Math.floor(hf));
+  };
+
   const hashStr = (s) => [...s].reduce((h, c) => (Math.imul(h, 31) + c.charCodeAt(0)) | 0, 7);
 
   function reading(station, t) {
@@ -53,7 +59,7 @@ NM.mock = (function () {
 
     // Slow drift (traffic waves) + per-minute jitter.
     const drift = 1.4 * Math.sin(minuteIdx / 9 + hashStr(station.id)) + 0.8 * Math.sin(minuteIdx / 37);
-    const laeq = NM.field.modelAt(station.x, station.y, hf) + ch.bias(h, dow) + drift + (rand() - 0.5) * 2.4;
+    const laeq = dailyDb(hf) + ch.bias(h, dow) + drift + (rand() - 0.5) * 2.4;
 
     const mix = typeof ch.mix === 'function' ? ch.mix(h, dow) : ch.mix;
     const raw = Object.fromEntries(Object.entries(mix).map(([k, v]) => [k, Math.max(0, v + (rand() - 0.5) * 0.1)]));

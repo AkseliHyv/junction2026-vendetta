@@ -1,2 +1,4 @@
-# ignore app cache folder
+# App Lab cache
 .cache/
+.DS_Store
+__pycache__/

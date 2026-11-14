@@ -1,25 +1,19 @@
 /*
- * Night-Noise Box — Microcontroller Firmware (Arduino UNO Q — STM32 Zephyr Core)
+ * STM32 side of the Night-Noise Box.
  *
- * Hardware on Qwiic (Wire1):
- *   - Modulino Pixels   (8x addressable RGB LEDs) -> live dB light bar + "no signal" pattern
- *   - Modulino Buttons  (Buttons A/B/C)           -> "woke me" marker on press
- *   - Modulino Movement (LSM6DSOX 6-axis IMU)     -> ~20 Hz box tamper detection
- *   - Modulino Knob     (Rotary encoder)          -> left in place unused
+ * Modulinos on the Qwiic port (Wire1):
+ *   Pixels    loudness bar, or a blinking "no signal" pattern
+ *   Buttons   any press sends woke_me()
+ *   Movement  sends tamper() when the box is moved
+ *   Knob      read but not used
  *
- * Shared Contract: see /CONTRACT.md
- *   Linux -> MCU (Bridge.provide):
- *     - level(float db)                     [~8 Hz calibrated loudness in dB]
- *     - label(String name, float confidence)[sent when label changes]
- *     - set_thresholds(float start_db, float end_db, int start_hold_ms, int end_hold_ms)
- *   MCU -> Linux (Bridge.notify):
- *     - event_start()
- *     - event_end(int duration_ms)
- *     - woke_me()
- *     - tamper()
- *     - heartbeat()                         [1 Hz MCU liveness signal]
- *     - mcu_level(float db)                 [optional, unused by default]
- *     - knob(int value)                     [legacy unused, left in place]
+ * From Linux:  level(db), label(name, confidence),
+ *              set_thresholds(start_db, end_db, start_hold_ms, end_hold_ms)
+ * To Linux:    event_start(), event_end(duration_ms), woke_me(), tamper(),
+ *              heartbeat() once a second, knob(value)
+ *
+ * In analysis mode Linux only sends level(), so this just drives the LED bar.
+ * python/sim_imu_replay.py mirrors this logic for tests; keep them in sync.
  */
 
 #ifndef HOST_SIMULATION
@@ -29,32 +23,29 @@
 #include <Arduino_Modulino.h>
 #endif
 
-// ---------------------------------------------------------------------------
-// Named Event Thresholds & Hold Constants (same dB units as level(db))
-// ---------------------------------------------------------------------------
-static const float         START_THRESHOLD_DB   = 52.0f;  // Event starts above this dB
-static const float         END_THRESHOLD_DB     = 45.0f;  // Event ends below this dB (< START)
-static const unsigned long START_HOLD_MS        = 375UL;  // Must stay >= START_THRESHOLD_DB
-static const unsigned long END_HOLD_MS          = 625UL;  // Must stay <= END_THRESHOLD_DB
-static const unsigned long NO_SIGNAL_TIMEOUT_MS = 2000UL; // 2 s watchdog if level(db) stops
+// --- Settings ---
+// Event thresholds, used until Linux sends set_thresholds().
+static const float         START_THRESHOLD_DB   = 52.0f;
+static const float         END_THRESHOLD_DB     = 45.0f;
+static const unsigned long START_HOLD_MS        = 375UL;  // how long it must stay above start
+static const unsigned long END_HOLD_MS          = 625UL;  // how long it must stay below end
+static const unsigned long NO_SIGNAL_TIMEOUT_MS = 2000UL; // no level() for this long = no signal
 
-// Loudness Light-Bar Mapping Constants (same dB units as level(db))
-static const float         LEVEL_BAR_MIN_DB     = 30.0f;  // Quiet room baseline -> 0 LEDs
-static const float         LEVEL_BAR_MAX_DB     = 78.0f;  // Loud night event    -> 8 LEDs
+static const float         LEVEL_BAR_MIN_DB     = 30.0f;  // 0 LEDs lit
+static const float         LEVEL_BAR_MAX_DB     = 78.0f;  // all 8 lit
 
-// Polling, Heartbeat & Debounce Intervals
-static const unsigned long IMU_INTERVAL_MS       = 50UL;   // ~20 Hz Movement polling for tamper
-static const unsigned long UI_INTERVAL_MS        = 25UL;   // 40 Hz Buttons / Pixels / Watchdog
-static const unsigned long HEARTBEAT_INTERVAL_MS = 1000UL; // 1 Hz heartbeat() to Linux
-static const unsigned long WOKE_DEBOUNCE_MS      = 200UL;  // Button debounce for woke_me()
-static const unsigned long TAMPER_DEBOUNCE_MS    = 1000UL; // Minimum gap between tamper() alerts
+static const unsigned long IMU_INTERVAL_MS       = 50UL;
+static const unsigned long UI_INTERVAL_MS        = 25UL;
+static const unsigned long HEARTBEAT_INTERVAL_MS = 1000UL;
+static const unsigned long WOKE_DEBOUNCE_MS      = 200UL;
+static const unsigned long TAMPER_DEBOUNCE_MS    = 1000UL;
 
-// Acceleration in g (1.0 = Earth gravity at rest); ~20 Hz EMA filter
+// Tamper = total acceleration differs from its slow average by this many g.
 static const float         GRAVITY_EMA_ALPHA    = 0.15f;
-static const float         TAMPER_THRESHOLD_G   = 0.28f;  // Box nudge / pickup threshold
+static const float         TAMPER_THRESHOLD_G   = 0.28f;
 
 static const int           NUM_PIXELS           = 8;
-static const int           DEFAULT_BRIGHTNESS   = 14;     // Bedroom-safe dim night brightness
+static const int           DEFAULT_BRIGHTNESS   = 14;     // dim enough for a bedroom
 
 #ifndef HOST_SIMULATION
 ModulinoMovement movement;
@@ -63,9 +54,7 @@ ModulinoKnob     knob;
 ModulinoPixels   pixels;
 #endif
 
-// ---------------------------------------------------------------------------
-// State Variables
-// ---------------------------------------------------------------------------
+// --- State ---
 static unsigned long lastImuMs          = 0;
 static unsigned long lastUiMs           = 0;
 static unsigned long lastHeartbeatMs    = 0;
@@ -74,20 +63,17 @@ static unsigned long lastTamperMs       = 0;
 static bool          hasWokeOnce        = false;
 static bool          hasTamperOnce      = false;
 
-// Runtime Thresholds (initialized from named defaults; updated via set_thresholds)
 static float         activeStartDb      = START_THRESHOLD_DB;
 static float         activeEndDb        = END_THRESHOLD_DB;
 static unsigned long activeStartHoldMs  = START_HOLD_MS;
 static unsigned long activeEndHoldMs    = END_HOLD_MS;
 
-// Signal & Watchdog State
 static float         currentLevelDb     = 0.0f;
 static String        currentLabel       = "background";
 static float         currentConfidence  = 0.0f;
 static bool          hasSignal          = false;
 static unsigned long lastLevelRxMs      = 0;
 
-// Hysteresis Event State
 static bool          eventOpen          = false;
 static unsigned long eventStartMs       = 0;
 static bool          aboveStartArmed    = false;
@@ -95,20 +81,15 @@ static unsigned long aboveStartSinceMs  = 0;
 static bool          belowEndArmed      = false;
 static unsigned long belowEndSinceMs    = 0;
 
-// Movement State
 static float         gravityMagEma     = 1.0f;
 static bool          imuInitialized    = false;
 
-// Button edge-detection state
 static bool          prevBtnState[3]   = {false, false, false};
 
-// Legacy Knob state (left in place unused; do not build on it yet)
 static int16_t       rawKnobOffset     = 0;
 static int           lastKnobReported  = -1;
 
-// ---------------------------------------------------------------------------
-// Pure Helpers
-// ---------------------------------------------------------------------------
+// --- Helpers ---
 static float clampf(float v, float lo, float hi) {
   if (v < lo) return lo;
   if (v > hi) return hi;
@@ -128,12 +109,10 @@ static int levelDbToLitLeds(float db) {
   return clampi(lit, 0, NUM_PIXELS);
 }
 
-// ---------------------------------------------------------------------------
-// Event Hysteresis & 2-Second Watchdog
-// ---------------------------------------------------------------------------
+// --- Event detection ---
 static void updateEventMachine(unsigned long nowMs) {
 #ifndef HOST_SIMULATION
-  // 1. Watchdog: no level(db) received for >= 2 seconds
+  // Linux stopped sending levels: close any open event.
   if (hasSignal && (nowMs - lastLevelRxMs) >= NO_SIGNAL_TIMEOUT_MS) {
     hasSignal = false;
     aboveStartArmed = false;
@@ -150,7 +129,6 @@ static void updateEventMachine(unsigned long nowMs) {
     return;
   }
 
-  // 2. Hysteresis transitions when signal is live (uses runtime active thresholds)
   if (!eventOpen) {
     if (currentLevelDb >= activeStartDb) {
       if (!aboveStartArmed) {
@@ -184,15 +162,13 @@ static void updateEventMachine(unsigned long nowMs) {
 #endif
 }
 
-// ---------------------------------------------------------------------------
-// Modulino Pixels Rendering: Loudness Light Bar vs. "No Signal" Pattern
-// ---------------------------------------------------------------------------
+// --- LEDs ---
 static void renderPixels(unsigned long nowMs) {
 #ifndef HOST_SIMULATION
   pixels.clear();
 
   if (!hasSignal) {
-    // Distinct "no signal" pattern: slow alternating outer endpoint LEDs (0 & 7)
+    // No signal: the two end LEDs blink alternately.
     bool phase = ((nowMs / 400UL) % 2UL) == 0UL;
     if (phase) {
       pixels.set(0, 120, 90, 220, DEFAULT_BRIGHTNESS);
@@ -208,13 +184,10 @@ static void renderPixels(unsigned long nowMs) {
   int lit = levelDbToLitLeds(currentLevelDb);
   for (int i = 0; i < lit; i++) {
     if (i < 4) {
-      // Quiet/background range: calm seafoam-teal
       pixels.set(i, 20, 184, 166, DEFAULT_BRIGHTNESS);
     } else if (i < 6) {
-      // Moderate noise range: warm amber
       pixels.set(i, 245, 175, 45, DEFAULT_BRIGHTNESS + 4);
     } else {
-      // High night noise above threshold: bright gold-orange
       pixels.set(i, 249, 115, 22, DEFAULT_BRIGHTNESS + 8);
     }
   }
@@ -223,9 +196,7 @@ static void renderPixels(unsigned long nowMs) {
 #endif
 }
 
-// ---------------------------------------------------------------------------
-// Bridge RPC Callbacks: Linux -> MCU
-// ---------------------------------------------------------------------------
+// --- Messages from Linux ---
 void onLevel(float db) {
 #ifndef HOST_SIMULATION
   unsigned long nowMs = millis();
@@ -236,9 +207,7 @@ void onLevel(float db) {
 #endif
 }
 
-// TODO(BOARD-CHECK): Confirm whether Arduino_RouterBridge on the UNO Q Zephyr
-// STM32 core passes RPC string arguments as Arduino `String` or `std::string`
-// when registered via `Bridge.provide("label", onLabel)`.
+// If the Bridge library won't compile this, try std::string instead of String.
 void onLabel(String name, float confidence) {
   currentLabel = name;
   currentConfidence = clampf(confidence, 0.0f, 1.0f);
@@ -255,9 +224,7 @@ void onSetThresholds(float startDb, float endDb, int startHoldMs, int endHoldMs)
   belowEndArmed = false;
 }
 
-// ---------------------------------------------------------------------------
-// ~20 Hz IMU Tamper Polling
-// ---------------------------------------------------------------------------
+// --- Tamper detection ---
 static void pollImu(unsigned long nowMs) {
 #ifndef HOST_SIMULATION
   if (!movement.update()) {
@@ -285,12 +252,9 @@ static void pollImu(unsigned long nowMs) {
 #endif
 }
 
-// ---------------------------------------------------------------------------
-// Buttons ("woke me") & Legacy Unused Knob Polling
-// ---------------------------------------------------------------------------
+// --- Buttons and knob ---
 static void pollControls(unsigned long nowMs) {
 #ifndef HOST_SIMULATION
-  // 1. Modulino Buttons: any button press marks "this woke me up"
   if (buttons.update()) {
     for (int i = 0; i < 3; i++) {
       bool pressed = buttons.isPressed(i);
@@ -306,7 +270,6 @@ static void pollControls(unsigned long nowMs) {
     buttons.setLeds(true, false, false);
   }
 
-  // 2. Modulino Knob (left in place unused; do not build on it yet)
   int raw = (int)knob.get();
   int mapped = clampi(50 + (raw - rawKnobOffset) * 2, 0, 100);
   if (mapped == 0 && (50 + (raw - rawKnobOffset) * 2) < 0) {
@@ -322,9 +285,7 @@ static void pollControls(unsigned long nowMs) {
 #endif
 }
 
-// ---------------------------------------------------------------------------
-// Arduino Lifecycle Entry Points
-// ---------------------------------------------------------------------------
+// --- setup / loop ---
 #ifndef HOST_SIMULATION
 void setup() {
   Bridge.begin();
@@ -332,7 +293,7 @@ void setup() {
   Bridge.provide("label", onLabel);
   Bridge.provide("set_thresholds", onSetThresholds);
 
-  // UNO Q Qwiic connector lives on Wire1
+  // The Qwiic connector is on Wire1.
   Wire1.begin();
   Modulino.begin(Wire1);
 

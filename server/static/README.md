@@ -1,18 +1,14 @@
-# Noise map — frontend
+# Noise map
 
-A static web map of noise in Otaniemi, Espoo. It has no build step and needs no API key. The basemap is [MapLibre GL](https://maplibre.org) (loaded from a CDN) with [OpenFreeMap](https://openfreemap.org) dark vector tiles. Streets come from OpenStreetMap. Serve the folder:
+The page `server.py` serves at `http://localhost:8080`. It's a world map: every box shows up at the `lat`/`lon` it sends, coloured by its latest level, with a glow around it. Tap a box to see its readings.
 
-```sh
-npx serve .            # or: python3 -m http.server
-```
+No build step and no API key. The basemap is [MapLibre GL](https://maplibre.org) from a CDN with [OpenFreeMap](https://openfreemap.org) tiles.
 
-Opening `index.html` from `file://` also works, but "my location" needs `http://localhost` or HTTPS.
-
-Without a backend it runs on a **demo feed**: synthetic payloads in the exact device format, from 8 stations, with 24 h of history. One station is deliberately offline. The status chip under the search bar says "Demo data" when this is the case.
+Open `http://localhost:8080/?demo` to see it with made-up data from 8 stations instead (one of them deliberately offline). "My location" needs `http://localhost` or HTTPS.
 
 ## How the map works
 
-1. **Stations** (Arduino UNO Q) upload one analysis per 15-minute window: 15 per-minute readings.
+1. **Stations** (the boxes) upload readings to the server. The map was designed for one upload per 15 minutes containing 15 one-minute readings; shorter readings (the boxes currently send 10 s ones) work too.
 2. The frontend polls the backend **20 s after every quarter hour** (`:00 :15 :30 :45`). It also polls when the tab becomes visible again.
 3. For each station, the latest window is aggregated:
    - **LAeq**: energy average of `laeq_db`, weighted by `valid_s`
@@ -21,25 +17,26 @@ Without a backend it runs on a **demo feed**: synthetic payloads in the exact de
    - **sources**: `valid_s`-weighted mean, normalised
    - **flags**: union over the window
 
-   Minutes with `valid_s < 20` are ignored. A station silent for more than 40 min is shown as offline and stops influencing the map.
-4. The **noise field** is a 10 m grid over the area (`NM.data.area`). It is a propagation model of the real OSM street network with daily traffic profiles. Each street is a line source: its peak-hour level comes from its road class, adjusted for speed limit and lanes. Its level drops about 3 dB per doubling of distance, plus extra attenuation for ground and buildings. Tunnels are left out. The field is corrected by the stations: each station's residual (measured − modelled) is spread with a Gaussian kernel of about 320 m. The map is exact near stations and falls back to the model far from them. Buildings are not modelled individually, so shielding behind them is underestimated.
-5. Tapping a street or spot shows its current estimate and a 24-hour chart. Tapping a sensor shows its measured window: peak, background, valid audio, sound sources and flags.
+   Readings with less than 20 s of valid audio per minute are ignored. A station silent for more than 40 min is shown grey, as offline.
+4. Tapping a station shows its latest level, a 24-hour chart, peak, background, valid audio, sound sources and flags.
 
-## Backend contract (to implement)
+## Backend
 
-Set the base URL in `index.html` (`window.NM_CONFIG = { apiBase: 'https://…/api' }`) or open the page with `?api=https://…/api`.
+`server.py` implements this. To point the map at a different server, set `apiBase` in `index.html` or open the page with `?api=https://…/api`.
 
 ```
 GET {apiBase}/readings?since=2026-11-14T12:30:00.000Z
 ```
 
-Return every stored device payload that contains readings newer than `since`, **unchanged from what the device sent**. You can return either a bare array or `{ "payloads": [...] }`:
+It returns every stored payload with readings newer than `since`, exactly as the box sent it, either as a bare array or as `{ "payloads": [...] }`:
 
 ```json
 [
   {
     "v": 1,
-    "station_id": "otaniemi-03",
+    "station_id": "box-01",
+    "lat": 60.1868,
+    "lon": 24.8274,
     "readings": [
       {
         "minute": "2026-11-14T13:00:00Z",
@@ -55,33 +52,23 @@ Return every stored device payload that contains readings newer than `since`, **
 ]
 ```
 
-- The first request asks for the last 24 h. Later requests overlap by 1 h, and duplicate minutes are de-duplicated client-side, so re-sending data is harmless.
-- If the API is on another origin, it must send CORS headers.
+- The first request asks for the last 24 h. Later requests overlap by 1 h; duplicate readings are dropped in the browser, so re-sending data is harmless.
+- An API on another origin must send CORS headers.
 - Only `v: 1` is accepted.
-
-## Registering a station
-
-Station positions live in `src/data.js` → `stations` (`id` = the device's `station_id`, `lat`/`lon` = where it is mounted). **The positions there now are placeholders for the demo.** Replace them with the real ones. Readings from unknown station ids are ignored, with a console warning.
+- `lat`/`lon` place the station on the map. There's no list of stations to keep up to date; a payload without them is ignored with a console warning. The 8 stations in `src/data.js` are only for `?demo`.
 
 ## Basemap
 
-`NM_CONFIG.mapStyle` (in `index.html`) takes any MapLibre style URL. The default is `https://tiles.openfreemap.org/styles/dark`, which is free and needs no key. To use MapTiler, Stadia, etc., paste their style URL with your key, e.g. `https://api.maptiler.com/maps/dataviz-dark/style.json?key=…`. The noise overlay is inserted under the style's first label layer.
-
-## Updating the street data
-
-`src/osm-roads.js` is a snapshot of OSM highways and light-rail lines in the area (driveways, parking aisles and tunnels are removed, and geometry is simplified to 2.5 m). To refresh it or cover a larger area, follow the instructions at the top of `tools/osm_to_js.py`. If you enlarge the area, also update `area` in `src/data.js`. Map data © OpenStreetMap contributors (ODbL); the attribution is shown on the map.
+`NM_CONFIG.mapStyle` (in `index.html`) takes any MapLibre style URL. The default is `https://tiles.openfreemap.org/styles/dark`, which is free and needs no key. To use MapTiler, Stadia, etc., paste their style URL with your key, e.g. `https://api.maptiler.com/maps/dataviz-dark/style.json?key=…`. The heat glow is drawn under the style's labels.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
 | `src/config.js` | API URL, time zone (`Europe/Helsinki`), window/poll/stale settings |
-| `src/osm-roads.js` | OpenStreetMap street snapshot (generated) |
-| `src/data.js` | Projection, area, road-class levels, places, stations, noise categories |
-| `src/field.js` | Propagation model, station correction, colour map |
+| `src/data.js` | Stations and the colour scales |
 | `src/store.js` | Ingests device payloads, aggregates windows and hourly bars |
 | `src/api.js` / `src/mock.js` | Backend client / demo feed |
-| `src/map.js` | MapLibre map: noise overlay, street glow, stations, markers, hit-testing |
-| `src/sheet.js`, `src/search.js` | Bottom sheet and search |
+| `src/map.js` | MapLibre map: stations, heat glow, markers |
+| `src/sheet.js`, `src/search.js` | Station sheet and station search |
 | `src/app.js` | Wiring, the 15-minute refresh loop, my location |
-| `tools/osm_to_js.py` | Regenerates `src/osm-roads.js` from an Overpass download |

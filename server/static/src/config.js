@@ -9,7 +9,7 @@ NM.config = Object.assign(
     // MapLibre basemap style. OpenFreeMap is free and needs no key. To use
     // MapTiler instead: 'https://api.maptiler.com/maps/dataviz-dark/style.json?key=YOUR_KEY'
     mapStyle: 'https://tiles.openfreemap.org/styles/dark',
-    // Time zone used for "hour of day" (chart axis, traffic profiles, labels).
+    // Time zone for "hour of day" in the chart and labels.
     timeZone: 'Europe/Helsinki',
     // Devices upload one analysis per window.
     windowMinutes: 15,
@@ -18,7 +18,7 @@ NM.config = Object.assign(
     // A station whose newest reading is older than this is shown as offline
     // and no longer influences the map.
     staleAfterMinutes: 40,
-    // Readings with less valid audio than this (out of 60 s) are ignored.
+    // Readings with less valid audio than this per 60 s are ignored (scaled for shorter readings).
     minValidSeconds: 20,
   },
   window.NM_CONFIG || {}

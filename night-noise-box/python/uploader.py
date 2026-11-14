@@ -1,28 +1,13 @@
 #!/usr/bin/env python3
-"""
-Night-Noise Box — Event Uploader (python/uploader.py)
------------------------------------------------------
-Pushes finished event records as JSON to the Noise Map server
-(`server/server.py`). Runs on the UNO Q Linux side: the STM32 has no network,
-so it reports `event_start` / `event_end` over Bridge and Linux uploads.
+"""Uploads JSON to the map server on a background thread.
 
-Payload (POST `UPLOAD_URL`, `Content-Type: application/json`):
+A slow or offline server never blocks audio processing: items wait in a
+bounded queue and failed requests are retried with backoff. When the queue is
+full the oldest items are dropped. Event records are still in the local
+SQLite database; analysis payloads are lost.
 
-    {
-      "device_id": "box-01", "lat": 52.52, "lon": 13.405,
-      "events": [ {"id": 7, "start_time": "...", "duration_ms": 2400,
-                   "label": "traffic", "confidence": 0.81,
-                   "avg_level": 58.2, "peak_level": 66.0,
-                   "woke_me": false, "tamper": false, "grid_cell": "B2"} ]
-    }
-
-`PayloadUploader` sends the periodic analysis summaries from
-`python/analysis.py` (map `v: 1` format) to `POST /api/readings` the same way.
-
-Only scalar fields are sent — never audio. Uploads happen on a daemon
-thread with a bounded queue so a slow or offline server never stalls the
-~8 Hz audio loop. Failed batches are retried with backoff; if the queue fills
-up, the oldest pending records are dropped (they remain in local SQLite).
+PayloadUploader sends analysis payloads to /api/readings, one per request.
+EventUploader sends event records (events mode) to /api/events in batches.
 """
 
 from __future__ import annotations
@@ -42,8 +27,6 @@ MAX_BACKOFF_SEC = 60.0
 
 
 class _BackgroundPoster:
-    """Bounded queue + daemon thread that POSTs JSON with retry/backoff."""
-
     max_batch = MAX_BATCH
     what = "item"
 
@@ -61,7 +44,6 @@ class _BackgroundPoster:
         self._thread.start()
 
     def submit(self, record: Dict[str, Any]) -> None:
-        """Queue one item (non-blocking)."""
         with self._cv:
             self._pending.append(dict(record))
             self._cv.notify()
@@ -107,13 +89,13 @@ class _BackgroundPoster:
                 self._inflight = len(batch)
             try:
                 self._post(batch)
-            except Exception as exc:  # network down, server offline, bad status ...
+            except Exception as exc:
                 self.fail_count += 1
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 if self.verbose:
                     print(f"[Uploader] {len(batch)} {self.what}(s) not sent ({self.last_error}); retry in {backoff:.0f}s")
                 with self._cv:
-                    # Put the batch back in front; deque maxlen drops the oldest if full.
+                    # Requeue at the front. If full, the deque drops the oldest.
                     room = MAX_PENDING - len(self._pending)
                     self._pending.extendleft(reversed(batch[-room:] if room > 0 else []))
                     self._inflight = 0
@@ -127,7 +109,7 @@ class _BackgroundPoster:
 
 
 class EventUploader(_BackgroundPoster):
-    """Event records -> POST /api/events. Re-submitting the same `id` updates it server-side."""
+    """Re-sending an event with the same id updates it on the server."""
 
     what = "event"
 
@@ -142,8 +124,6 @@ class EventUploader(_BackgroundPoster):
 
 
 class PayloadUploader(_BackgroundPoster):
-    """Whole v1 analysis payloads (python/analysis.py) -> POST /api/readings, one per request."""
-
     max_batch = 1
     what = "analysis"
 

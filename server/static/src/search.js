@@ -1,32 +1,15 @@
-/* Search box: streets (from OSM), named places and measuring stations. */
+/* Search box for stations, by name or id. */
 window.NM = window.NM || {};
 
 NM.search = (function () {
   const U = NM.util, D = NM.data;
   let input, list, onPick = () => {};
-  let items = [], results = [], active = -1;
+  let results = [], active = -1;
 
   function init(opts = {}) {
     onPick = opts.onPick || onPick;
     input = document.getElementById('search');
     list = document.getElementById('results');
-
-    // OSM splits a street into many ways: group them by name.
-    const streets = new Map();
-    for (const r of D.roads) {
-      if (!r.name) continue;
-      if (!streets.has(r.name)) streets.set(r.name, []);
-      streets.get(r.name).push(r);
-    }
-    const streetKind = (roads) => {
-      const labels = new Set(roads.map((r) => r.label));
-      return labels.has('Motorway') ? 'Motorway' : labels.has('Main road') ? 'Main road' : labels.size === 1 ? [...labels][0] : 'Street';
-    };
-    items = [
-      ...[...streets].map(([name, roads]) => ({ type: 'road', name, kind: streetKind(roads), roads })),
-      ...D.places.map((p) => ({ type: 'place', name: p.name, kind: p.kind, place: p, alt: p.alt })),
-      ...D.stations.map((s) => ({ type: 'station', name: s.name, kind: `Sensor · ${s.id}`, station: s, alt: s.id })),
-    ];
 
     input.addEventListener('input', render);
     input.addEventListener('focus', render);
@@ -69,6 +52,7 @@ NM.search = (function () {
       if (fold(n).includes(fold(q)) || (it.alt && fold(it.alt).includes(fold(q)))) return 3;
       return -1;
     };
+    const items = D.stations.map((s) => ({ name: s.name, kind: `Sensor · ${s.id}`, alt: s.id.toLowerCase(), station: s }));
     results = items
       .map((it) => [score(it), it])
       .filter(([s]) => s >= 0)
@@ -78,7 +62,7 @@ NM.search = (function () {
     active = results.length ? 0 : -1;
     list.innerHTML = results.length
       ? results.map((it, i) => `<li data-i="${i}" role="option"><span class="r-name">${U.escape(it.name)}</span><span class="r-kind">${U.escape(it.kind)}</span></li>`).join('')
-      : `<li class="r-empty">No places match “${U.escape(input.value.trim())}”</li>`;
+      : `<li class="r-empty">No stations match “${U.escape(input.value.trim())}”</li>`;
     list.hidden = false;
     highlight();
   }
@@ -97,7 +81,7 @@ NM.search = (function () {
     input.value = '';
     close();
     input.blur();
-    onPick(it);
+    onPick(it.station);
   }
 
   return { init };

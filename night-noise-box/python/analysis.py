@@ -1,39 +1,28 @@
 #!/usr/bin/env python3
-"""
-Night-Noise Box — Periodic noise analysis (python/analysis.py)
---------------------------------------------------------------
-Listens to the microphone continuously, and every `ANALYSIS_SECONDS` uploads
-one summary to the Noise Map server in the map's `v: 1` device format
-(see server/static/README.md):
+"""Measures noise from the mic and uploads a summary every ANALYSIS_SECONDS.
 
-    {
-      "v": 1, "station_id": "box-01", "lat": 52.52, "lon": 13.405,
-      "model": "placeholder", "weighting": "Z", "analysis_seconds": 10.0,
-      "readings": [
-        {"minute": "2026-11-14T22:10:00Z", "duration_s": 10.0,
-         "laeq_db": 48.3, "lmax_db": 61.0, "l90_db": 39.5,
-         "sources": {"traffic": 0.7, "voices": 0.3}, "valid_s": 10.0,
-         "flags": ["no_model"]}
-      ]
-    }
+Each upload is one payload in the map's v1 format (see server/static/README.md):
 
-One reading covers `READING_SECONDS` (10 s now; 60 s gives the per-minute
-readings the map is designed around). The field is still called `minute`
-because that's the map's key; it holds the reading's start time (UTC).
+    {"v": 1, "station_id": "box-01", "lat": 60.18, "lon": 24.83, "model": "...",
+     "readings": [{"minute": "2026-11-14T22:10:00Z", "duration_s": 10.0,
+                   "laeq_db": 48.3, "lmax_db": 61.0, "l90_db": 39.5,
+                   "sources": {"traffic": 0.7, "voices": 0.3}, "valid_s": 10.0,
+                   "flags": []}]}
 
-Per 125 ms block we compute a loudness level (RMS -> dBFS + calibration
-offset). LAeq is the energy mean of those levels, Lmax the loudest block, and
-L90 the level exceeded 90 % of the time. Each time the classifier's input
-window fills up (1 s for a typical Edge Impulse audio model) it is
-classified, and the scores are averaged per reading into `sources`.
+`minute` is the reading's start time. The name comes from the map, which was
+designed around one reading per minute.
 
-Privacy: PCM lives only in two fixed-size `array('h')` buffers (one block,
-one classifier window) that are overwritten in place and zeroed on exit. Only
-the scalar summaries above leave the box.
+Audio is read in 125 ms blocks. Each block becomes one dB level; LAeq is the
+energy mean of those, Lmax the loudest block and L90 the level exceeded 90 % of
+the time. Whenever the classifier's input window fills (usually 1 s) it is
+classified, and the scores are averaged into `sources`.
+
+Audio only ever sits in two fixed buffers that are overwritten in place and
+zeroed on exit. Nothing but the numbers above leaves the box.
 
     python3 python/analysis.py --self-test
-    python3 python/analysis.py --mic synthetic --once     # laptop, no mic needed
-    python3 python/analysis.py --once                     # board: one 10 s analysis
+    python3 python/analysis.py --mic synthetic --once   # laptop, no mic
+    python3 python/analysis.py --once                   # board, one analysis
 """
 
 from __future__ import annotations
@@ -182,7 +171,7 @@ class NoiseAnalyzer:
         self.on_level = on_level
         self.clock = clock
         self.flags = ["no_model"] if isinstance(classifier, PlaceholderClassifier) else []
-        # The only places PCM ever lives: overwritten in place, never copied out.
+        # The only places audio is kept.
         self._block = array.array("h", [0] * (mic.sample_rate // BLOCKS_PER_SEC))
         self._clf_buf = array.array("h", [0] * classifier.window_samples)
         self._clf_fill = 0
@@ -271,7 +260,7 @@ def run_forever(
     once: bool = False,
     stop: Optional[Callable[[], bool]] = None,
 ) -> None:
-    """Capture -> analyse -> upload, back to back (uploads run on a background thread)."""
+    """Analyse and upload in a loop. Uploads run on a background thread."""
     from uploader import PayloadUploader
 
     uploader = PayloadUploader(readings_url) if readings_url else None
@@ -295,13 +284,9 @@ def run_forever(
         analyzer.close()
 
 
-# ---------------------------------------------------------------------------
-# Self-test (no mic, no model, no network)
-# ---------------------------------------------------------------------------
 def run_self_test() -> None:
     from mic import SyntheticMic
 
-    print("=== Analysis check: levels, L90, classifier windows, sources, payload ===")
 
     class FakeModel:
         name = "fake-model"
@@ -326,7 +311,7 @@ def run_self_test() -> None:
         label_map={"car": "traffic", "speech": "voices", "silence": ""},
     )
     p = an.run_analysis()
-    json.dumps(p)  # must be pure JSON
+    json.dumps(p)
     assert p["v"] == 1 and p["station_id"] == DEVICE_ID and len(p["readings"]) == 2
     assert FakeModel.calls == 10, FakeModel.calls  # 10 s of audio / 1 s windows
     for r in p["readings"]:
@@ -345,7 +330,7 @@ def run_self_test() -> None:
     assert r["sources"] == {} and r["flags"] == ["no_model"]
     ph.close()
     print(describe(p))
-    print("=== PASS ===")
+    print("analysis self-test passed")
 
 
 def main() -> None:

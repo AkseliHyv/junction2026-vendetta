@@ -16,12 +16,12 @@
   </head>
   <body>
     <main class="app">
-      <div id="map" class="map" role="region" aria-label="Noise map. Tap a street or sensor for details."></div>
+      <div id="map" class="map" role="region" aria-label="Noise map. Tap a sensor for details."></div>
 
       <header class="top">
         <form class="search" role="search" autocomplete="off">
           <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" /><path d="M15.5 15.5 20 20" /></svg>
-          <input id="search" type="search" placeholder="Search" aria-label="Search a place" aria-controls="results" />
+          <input id="search" type="search" placeholder="Search stations" aria-label="Search stations" aria-controls="results" />
         </form>
         <ul id="results" class="results" role="listbox" hidden></ul>
         <div id="status" class="status" data-state="loading" role="status">
@@ -67,9 +67,7 @@
     <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.1/dist/maplibre-gl.js" integrity="sha384-nXMl9YiLoSG5KBPTFgvxVuIqQQcqIvo0bFrvoEaGJC6r7IibIzF1S36Zbf/sKBtL" crossorigin="anonymous"></script>
     <script src="src/config.js"></script>
     <script src="src/util.js"></script>
-    <script src="src/osm-roads.js"></script>
     <script src="src/data.js"></script>
-    <script src="src/field.js"></script>
     <script src="src/store.js"></script>
     <script src="src/mock.js"></script>
     <script src="src/api.js"></script>

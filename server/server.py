@@ -1,27 +1,16 @@
 #!/usr/bin/env python3
-"""
-Night-Noise Box — Noise Map Server (server/server.py)
------------------------------------------------------
-Receives JSON event uploads from one or more UNO Q boxes
-(`python/uploader.py`) and serves a real street map with a noise heatmap on
-top (`server/static/index.html`). Click anywhere on the heat to see which
-noises were recorded there.
+"""Map server. Stores what the boxes upload and serves the map in static/.
 
-    python3 server/server.py                 # http://localhost:8080, seeds test data if DB is empty
-    python3 server/server.py --no-seed       # start empty (real boxes only)
-    python3 server/server.py --reseed        # wipe simulated rows and regenerate them
-    python3 server/server.py --center 60.17,24.94   # seed test data around another city
+    python3 server/server.py              # http://localhost:8080
+    python3 server/server.py --no-seed    # don't add simulated events to an empty database
 
-API:
-    POST /api/events    {"device_id", "lat", "lon", "events": [record, ...]}
-                        (a single record with device_id/lat/lon inline also works)
-    GET  /api/events    ?hours=N  -> {"events": [...], "devices": [...]}
-    POST /api/readings  v1 analysis payload from python/analysis.py, stored unchanged
-    GET  /api/readings  ?since=<ISO> -> {"payloads": [...]}  (contract in static/README.md;
-                        open the map with ?api=/api to use it instead of the demo feed)
+    POST /api/readings   analysis payload from a box (analysis.py), stored as-is
+    GET  /api/readings   ?since=<ISO time>  ->  {"payloads": [...]}   (read by the map)
+    POST /api/events     {"device_id", "lat", "lon", "events": [...]} from events mode
+    GET  /api/events     ?hours=N  ->  {"events": [...], "devices": [...]}
 
-Standard library only. Records are upserted on (device_id, event id), so a box
-re-sending an event after a "woke me" press updates it instead of duplicating.
+Events are keyed on (device_id, event id), so re-sending an event after a
+"woke me" press updates it. Standard library only.
 """
 
 from __future__ import annotations
@@ -75,7 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_readings_last ON readings(last_ts);
 
 
 def iso_utc(ts: str) -> str:
-    """Normalises an ISO-8601 timestamp to "YYYY-MM-DDTHH:MM:SS.mmmZ" (UTC) so text comparison sorts by time."""
+    """Any ISO timestamp as UTC "YYYY-MM-DDTHH:MM:SS.mmmZ", so strings sort by time."""
     dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -161,7 +150,7 @@ class MapStore:
         }
 
     def add_readings(self, payload: Dict[str, Any]) -> int:
-        """Stores one v1 analysis payload unchanged; re-sending the same window replaces it."""
+        """Re-sending a payload for the same time window replaces it."""
         if payload.get("v") != 1:
             raise ValueError("only v: 1 payloads are accepted")
         station = str(payload["station_id"])[:64]
@@ -200,9 +189,7 @@ class MapStore:
             self._conn.commit()
 
 
-# ---------------------------------------------------------------------------
-# Test data: simulated boxes around a few plausible noise hotspots
-# ---------------------------------------------------------------------------
+# --- Simulated events, so /api/events has something to show without boxes ---
 HOTSPOTS = [
     # name, d_lat, d_lon, radius_deg, boxes, label weights, active hours, base dB
     ("nightlife street", 0.006, -0.010, 0.004, 14, {"music": 5, "voices": 6, "traffic": 1}, range(21, 28), 62),
@@ -252,16 +239,14 @@ def seed_test_data(store: MapStore, center_lat: float, center_lon: float, days: 
     return total
 
 
-# ---------------------------------------------------------------------------
-# HTTP
-# ---------------------------------------------------------------------------
+# --- HTTP ---
 def make_handler(store: MapStore):
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
 
         def log_message(self, fmt: str, *args: Any) -> None:
-            return  # uploads are logged in do_POST; static/GET traffic stays quiet
+            return  # only uploads are logged, in do_POST
 
         def _json(self, code: int, obj: Any) -> None:
             body = json.dumps(obj).encode("utf-8")
@@ -362,7 +347,7 @@ def main() -> None:
 
     ThreadingHTTPServer.allow_reuse_address = True
     srv = ThreadingHTTPServer((args.host, args.port), make_handler(store))
-    print(f"[Noise Map] map at http://localhost:{args.port}  ·  boxes POST to http://<this-host>:{args.port}/api/events")
+    print(f"[Noise Map] map at http://localhost:{args.port}, boxes upload to http://<this computer's IP>:{args.port}/api/readings")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

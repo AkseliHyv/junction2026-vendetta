@@ -63,6 +63,31 @@ After any code or config change, re-run `deploy.sh` and press **Run** again.
 
 > `AUDIO_SOURCE = "live"` / `--source live` intentionally exits with a message pointing at `TODO(BOARD-CHECK)` in `python/audio.py` until the live microphone + Edge Impulse reader is verified (checklist step 6 below).
 
+### Periodic analysis mode (default: `RUN_MODE = "analysis"`)
+
+`python/main.py` now starts `python/analysis.py` by default. It listens to the USB camera mic
+(`arecord` pipe, auto-detected USB capture card, nothing written to disk). Every
+`ANALYSIS_SECONDS` (10 s for now) it POSTs one summary to `READINGS_URL`
+(`/api/readings`) in the map's `v: 1` format: `laeq_db`, `lmax_db`, `l90_db`, `valid_s`,
+`sources` (Edge Impulse class shares) and `flags`. Set `RUN_MODE = "events"` to get the original
+MCU event pipeline and local page back.
+
+```bash
+python3 night-noise-box/python/mic.py --list                     # on the board: which capture device "auto" picks
+python3 night-noise-box/python/mic.py --seconds 3                # live dBFS check
+python3 night-noise-box/python/analysis.py --once                # one 10 s analysis, uploaded
+python3 night-noise-box/python/analysis.py --mic synthetic --once --readings-url ''   # laptop, no mic
+python3 night-noise-box/python/analysis.py --self-test
+```
+
+Until the Edge Impulse model is dropped into `night-noise-box/models/` (see
+`models/README.md`), loudness is measured for real, `sources` is empty and readings are flagged
+`no_model`. The server stores payloads unchanged and serves them at
+`GET /api/readings?since=…`; open the map with `?api=/api` to read them instead of the demo feed.
+The map only shows stations listed in `server/static/src/data.js` (add `DEVICE_ID` there), and by
+default it ignores readings with `valid_s < 20` (`minValidSeconds`). Lower that setting while
+analyses are 10 s long.
+
 ### Run without a board (laptop dev mode)
 
 ```bash

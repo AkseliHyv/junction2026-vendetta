@@ -16,6 +16,9 @@ API:
     POST /api/events    {"device_id", "lat", "lon", "events": [record, ...]}
                         (a single record with device_id/lat/lon inline also works)
     GET  /api/events    ?hours=N  -> {"events": [...], "devices": [...]}
+    POST /api/readings  v1 analysis payload from python/analysis.py, stored unchanged
+    GET  /api/readings  ?since=<ISO> -> {"payloads": [...]}  (contract in static/README.md;
+                        open the map with ?api=/api to use it instead of the demo feed)
 
 Standard library only. Records are upserted on (device_id, event id), so a box
 re-sending an event after a "woke me" press updates it instead of duplicating.
@@ -29,7 +32,7 @@ import random
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -59,7 +62,24 @@ CREATE TABLE IF NOT EXISTS events (
     PRIMARY KEY (device_id, event_id)
 );
 CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_time);
+CREATE TABLE IF NOT EXISTS readings (
+    station_id  TEXT NOT NULL,
+    first_ts    TEXT NOT NULL,          -- earliest reading "minute" in the payload (UTC ISO)
+    last_ts     TEXT NOT NULL,          -- latest reading "minute" in the payload (UTC ISO)
+    payload     TEXT NOT NULL,          -- device payload exactly as received
+    received_at REAL NOT NULL,
+    PRIMARY KEY (station_id, first_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_readings_last ON readings(last_ts);
 """
+
+
+def iso_utc(ts: str) -> str:
+    """Normalises an ISO-8601 timestamp to "YYYY-MM-DDTHH:MM:SS.mmmZ" (UTC) so text comparison sorts by time."""
+    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 class MapStore:
@@ -140,6 +160,36 @@ class MapStore:
             ],
         }
 
+    def add_readings(self, payload: Dict[str, Any]) -> int:
+        """Stores one v1 analysis payload unchanged; re-sending the same window replaces it."""
+        if payload.get("v") != 1:
+            raise ValueError("only v: 1 payloads are accepted")
+        station = str(payload["station_id"])[:64]
+        readings = payload["readings"]
+        if not isinstance(readings, list) or not readings:
+            raise ValueError("readings must be a non-empty list")
+        stamps = sorted(iso_utc(str(r["minute"])) for r in readings)
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO readings (station_id, first_ts, last_ts, payload, received_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(station_id, first_ts) DO UPDATE SET
+                       last_ts=excluded.last_ts, payload=excluded.payload, received_at=excluded.received_at""",
+                (station, stamps[0], stamps[-1], json.dumps(payload), time.time()),
+            )
+            self._conn.commit()
+        return len(readings)
+
+    def readings_since(self, since: Optional[str]) -> List[Dict[str, Any]]:
+        sql, args = "SELECT payload FROM readings", ()
+        if since:
+            sql += " WHERE last_ts > ?"
+            args = (iso_utc(since),)
+        sql += " ORDER BY last_ts LIMIT 5000"
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [json.loads(r["payload"]) for r in rows]
+
     def count(self) -> int:
         with self._lock:
             return int(self._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0])
@@ -219,8 +269,19 @@ def make_handler(store: MapStore):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self._cors()
             self.end_headers()
             self.wfile.write(body)
+
+        def _cors(self) -> None:
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+        def do_OPTIONS(self) -> None:
+            self.send_response(204)
+            self._cors()
+            self.end_headers()
 
         def do_GET(self) -> None:
             url = urlparse(self.path)
@@ -232,15 +293,35 @@ def make_handler(store: MapStore):
                     hours = None
                 self._json(200, store.query(hours))
                 return
+            if url.path == "/api/readings":
+                since = parse_qs(url.query).get("since", [None])[0]
+                try:
+                    self._json(200, {"payloads": store.readings_since(since)})
+                except ValueError as exc:
+                    self._json(400, {"ok": False, "error": f"bad since: {exc}"})
+                return
             super().do_GET()
 
         def do_POST(self) -> None:
-            if urlparse(self.path).path != "/api/events":
+            path = urlparse(self.path).path
+            if path not in ("/api/events", "/api/readings"):
                 self._json(404, {"ok": False, "error": "not found"})
                 return
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > MAX_BODY:
                 self._json(413 if length > MAX_BODY else 400, {"ok": False, "error": "bad body size"})
+                return
+            if path == "/api/readings":
+                try:
+                    body = json.loads(self.rfile.read(length))
+                    n = store.add_readings(body)
+                except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                    self._json(400, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+                    return
+                r = body["readings"][-1]
+                print(f"[Noise Map] analysis from {body['station_id']}: {n} reading(s), "
+                      f"LAeq {r.get('laeq_db')} dB, sources {r.get('sources')} {r.get('flags') or ''}", flush=True)
+                self._json(200, {"ok": True, "stored": n})
                 return
             try:
                 body = json.loads(self.rfile.read(length))
@@ -255,7 +336,7 @@ def make_handler(store: MapStore):
             except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
                 self._json(400, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
                 return
-            print(f"[Noise Map] {n} event(s) from {device_id} @ {lat:.4f},{lon:.4f}")
+            print(f"[Noise Map] {n} event(s) from {device_id} @ {lat:.4f},{lon:.4f}", flush=True)
             self._json(200, {"ok": True, "stored": n})
 
     return Handler

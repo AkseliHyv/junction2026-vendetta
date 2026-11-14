@@ -62,7 +62,9 @@ from config import (  # noqa: E402
     DEVICE_LON,
     GRID_CELL,
     PROFILES,
+    READINGS_URL,
     RETENTION_DAYS,
+    RUN_MODE,
     UPLOAD_URL,
 )
 from store import CSV_COLUMNS, NoiseStore  # noqa: E402
@@ -982,6 +984,28 @@ def run_uno_q_board(source_mode: str, db_path: str, upload_url: str = UPLOAD_URL
     App.run()
 
 
+def run_analysis_mode(db_path: str, readings_url: str, mic_kind: Optional[str] = None) -> None:
+    """RUN_MODE="analysis": listen -> analyse ANALYSIS_SECONDS -> upload v1 summary, forever."""
+    from analysis import build_analyzer, run_forever
+    from config import MIC_SOURCE
+
+    saved = load_saved_calibration(default_calibration_path_for_db(db_path))
+    offset = saved[0] if saved is not None else CALIBRATION_OFFSET_DB
+    on_level = None
+    if ON_UNO_Q and Bridge is not None:
+        # Keep the STM32's LED bar + watchdog fed; its event messages are ignored in this mode.
+        for name in ("event_start", "event_end", "woke_me", "tamper", "heartbeat", "mcu_level", "knob"):
+            Bridge.provide(name, lambda *_a: None)
+        on_level = lambda db: Bridge.notify("level", db)  # noqa: E731
+
+    analyzer = build_analyzer(mic_kind or MIC_SOURCE, calibration_offset_db=offset, on_level=on_level)
+    if ON_UNO_Q and App is not None:
+        threading.Thread(target=run_forever, args=(analyzer, readings_url), daemon=True).start()
+        App.run()
+    else:
+        run_forever(analyzer, readings_url)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="UNO Q Night-Noise Box Linux Coordinator")
     parser.add_argument(
@@ -1002,10 +1026,22 @@ def main() -> None:
         help=f"Noise Map server endpoint for JSON event uploads ('' disables; default {UPLOAD_URL!r})",
     )
     parser.add_argument("--fake-audio", action="store_true", help="Alias for --source fake")
+    parser.add_argument(
+        "--mode",
+        choices=("analysis", "events"),
+        default=RUN_MODE,
+        help=f"analysis = periodic mic analysis + upload; events = MCU event pipeline (default {RUN_MODE!r})",
+    )
+    parser.add_argument("--mic", choices=("alsa", "synthetic"), default=None, help="Analysis mode mic (default MIC_SOURCE)")
+    parser.add_argument("--readings-url", type=str, default=READINGS_URL, help="Analysis mode upload endpoint ('' = print only)")
     args = parser.parse_args()
 
     if args.self_test:
         run_self_test()
+        return
+
+    if args.mode == "analysis":
+        run_analysis_mode(args.db, args.readings_url, args.mic)
         return
 
     resolved_source = args.source if args.source is not None else AUDIO_SOURCE

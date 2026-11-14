@@ -16,7 +16,10 @@ Payload (POST `UPLOAD_URL`, `Content-Type: application/json`):
                    "woke_me": false, "tamper": false, "grid_cell": "B2"} ]
     }
 
-Only scalar event fields are sent — never audio. Uploads happen on a daemon
+`PayloadUploader` sends the periodic analysis summaries from
+`python/analysis.py` (map `v: 1` format) to `POST /api/readings` the same way.
+
+Only scalar fields are sent — never audio. Uploads happen on a daemon
 thread with a bounded queue so a slow or offline server never stalls the
 ~8 Hz audio loop. Failed batches are retried with backoff; if the queue fills
 up, the oldest pending records are dropped (they remain in local SQLite).
@@ -38,12 +41,14 @@ TIMEOUT_SEC = 5.0
 MAX_BACKOFF_SEC = 60.0
 
 
-class EventUploader:
-    def __init__(self, url: str, device_id: str, lat: float, lon: float, verbose: bool = True) -> None:
+class _BackgroundPoster:
+    """Bounded queue + daemon thread that POSTs JSON with retry/backoff."""
+
+    max_batch = MAX_BATCH
+    what = "item"
+
+    def __init__(self, url: str, verbose: bool = True) -> None:
         self.url = url
-        self.device_id = device_id
-        self.lat = float(lat)
-        self.lon = float(lon)
         self.verbose = verbose
         self._pending: Deque[Dict[str, Any]] = deque(maxlen=MAX_PENDING)
         self._cv = threading.Condition()
@@ -56,7 +61,7 @@ class EventUploader:
         self._thread.start()
 
     def submit(self, record: Dict[str, Any]) -> None:
-        """Queue one event record (non-blocking). Re-submitting the same `id` updates it server-side."""
+        """Queue one item (non-blocking)."""
         with self._cv:
             self._pending.append(dict(record))
             self._cv.notify()
@@ -78,10 +83,11 @@ class EventUploader:
             "last_error": self.last_error,
         }
 
+    def _body(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+        raise NotImplementedError
+
     def _post(self, batch: List[Dict[str, Any]]) -> None:
-        body = json.dumps(
-            {"device_id": self.device_id, "lat": self.lat, "lon": self.lon, "events": batch}
-        ).encode("utf-8")
+        body = json.dumps(self._body(batch)).encode("utf-8")
         req = urllib.request.Request(
             self.url, data=body, method="POST", headers={"Content-Type": "application/json"}
         )
@@ -97,7 +103,7 @@ class EventUploader:
                     self._cv.wait()
                 if self._stop:
                     return
-                batch = [self._pending.popleft() for _ in range(min(MAX_BATCH, len(self._pending)))]
+                batch = [self._pending.popleft() for _ in range(min(self.max_batch, len(self._pending)))]
                 self._inflight = len(batch)
             try:
                 self._post(batch)
@@ -105,7 +111,7 @@ class EventUploader:
                 self.fail_count += 1
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 if self.verbose:
-                    print(f"[Uploader] {len(batch)} event(s) not sent ({self.last_error}); retry in {backoff:.0f}s")
+                    print(f"[Uploader] {len(batch)} {self.what}(s) not sent ({self.last_error}); retry in {backoff:.0f}s")
                 with self._cv:
                     # Put the batch back in front; deque maxlen drops the oldest if full.
                     room = MAX_PENDING - len(self._pending)
@@ -118,3 +124,28 @@ class EventUploader:
             self.sent_count += len(batch)
             self.last_error = None
             self._inflight = 0
+
+
+class EventUploader(_BackgroundPoster):
+    """Event records -> POST /api/events. Re-submitting the same `id` updates it server-side."""
+
+    what = "event"
+
+    def __init__(self, url: str, device_id: str, lat: float, lon: float, verbose: bool = True) -> None:
+        self.device_id = device_id
+        self.lat = float(lat)
+        self.lon = float(lon)
+        super().__init__(url, verbose)
+
+    def _body(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {"device_id": self.device_id, "lat": self.lat, "lon": self.lon, "events": batch}
+
+
+class PayloadUploader(_BackgroundPoster):
+    """Whole v1 analysis payloads (python/analysis.py) -> POST /api/readings, one per request."""
+
+    max_batch = 1
+    what = "analysis"
+
+    def _body(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return batch[0]

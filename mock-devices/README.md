@@ -30,6 +30,7 @@ of raw payloads, next to its 5-minute and hourly summaries (about 1 GB).
 | Option | Default | |
 | --- | --- | --- |
 | `--server URL` | `http://localhost:8080` | map server |
+| `--key KEY` | `$NOISE_MAP_KEY` | upload key for servers that set `NOISE_MAP_KEY` |
 | `--city` | | run the 3,000 boxes in `city/devices.json` instead of `--devices` |
 | `--processes N` | 1 | split the fleet over N processes; with `--backfill-hours`, N more compute the history alongside |
 | `--generate N` | 0 | add N generated boxes, scattered ~1 km around the listed ones |

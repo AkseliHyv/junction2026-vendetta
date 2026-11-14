@@ -40,12 +40,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
+from summaries import AGG_KEEP_DAYS, contributions, iso_utc, summary_payloads, summary_plan
+
 HERE = Path(__file__).resolve().parent
 STATIC_DIR = HERE / "static"
 LABELS = ("traffic", "construction", "music", "voices", "background", "unknown")
 MAX_BODY = 1_000_000
-AGG_RES = (300, 3600)  # summary windows kept per station: 5 minutes and 1 hour
-AGG_KEEP_DAYS = 8
 
 
 def load_env_file(path: Path) -> None:
@@ -109,51 +109,6 @@ CREATE INDEX IF NOT EXISTS idx_agg_start ON agg(res, start_ts);
 """
 
 
-def _window_start(ts: str, res: int) -> str:
-    dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
-    t = int(dt.timestamp()) // res * res
-    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-
-def _contributions(payload: Dict[str, Any]) -> Dict[Tuple[int, str], Dict[str, Any]]:
-    """What a payload adds to each summary window."""
-    out: Dict[Tuple[int, str], Dict[str, Any]] = {}
-    for r in payload.get("readings") or []:
-        try:
-            laeq = float(r["laeq_db"])
-            ts = iso_utc(str(r["minute"]))
-        except (KeyError, TypeError, ValueError):
-            continue
-        dur = float(r.get("duration_s") or 60.0)
-        w = float(r["valid_s"]) if isinstance(r.get("valid_s"), (int, float)) else dur
-        for res in AGG_RES:
-            c = out.setdefault((res, _window_start(ts, res)), {
-                "duration_s": 0.0, "valid_s": 0.0, "e_sum": 0.0, "l90_sum": 0.0, "lmax": None,
-                "src": {}, "flags": {}, "n": 0})
-            c["duration_s"] += dur
-            c["valid_s"] += w
-            c["e_sum"] += w * 10 ** (laeq / 10)
-            if isinstance(r.get("l90_db"), (int, float)):
-                c["l90_sum"] += w * float(r["l90_db"])
-            if isinstance(r.get("lmax_db"), (int, float)):
-                c["lmax"] = max(c["lmax"] or -math.inf, float(r["lmax_db"]))
-            for k, v in (r.get("sources") or {}).items():
-                if isinstance(v, (int, float)):
-                    c["src"][k] = c["src"].get(k, 0.0) + w * v
-            for f in r.get("flags") or []:
-                c["flags"][str(f)] = c["flags"].get(str(f), 0) + 1
-            c["n"] += 1
-    return out
-
-
-def iso_utc(ts: str) -> str:
-    """Any ISO timestamp as UTC "YYYY-MM-DDTHH:MM:SS.mmmZ", so strings sort by time."""
-    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-
-
 class SqliteStore:
     def __init__(self, path: str) -> None:
         self._conn = sqlite3.connect(path, check_same_thread=False)
@@ -173,7 +128,7 @@ class SqliteStore:
         with self._lock:
             for row in self._conn.execute("SELECT payload FROM readings ORDER BY first_ts").fetchall():
                 p = json.loads(row["payload"])
-                self._apply(str(p.get("station_id"))[:64], p.get("lat"), p.get("lon"), _contributions(p), 1)
+                self._apply(str(p.get("station_id"))[:64], p.get("lat"), p.get("lon"), contributions(p), 1)
                 n += 1
             self._conn.commit()
         if n:
@@ -305,8 +260,8 @@ class SqliteStore:
                 "SELECT payload FROM readings WHERE station_id=? AND first_ts=?", (station, stamps[0])).fetchone()
             if old is not None:  # a re-send replaces the earlier copy in the summaries too
                 op = json.loads(old["payload"])
-                self._apply(station, None, None, _contributions(op), -1)
-            self._apply(station, payload.get("lat"), payload.get("lon"), _contributions(payload), 1)
+                self._apply(station, None, None, contributions(op), -1)
+            self._apply(station, payload.get("lat"), payload.get("lon"), contributions(payload), 1)
             self._conn.execute(
                 """INSERT INTO readings (station_id, first_ts, last_ts, payload, received_at)
                    VALUES (?, ?, ?, ?, ?)
@@ -321,51 +276,18 @@ class SqliteStore:
         return len(readings)
 
     def summaries_since(self, since: Optional[str]) -> List[Dict[str, Any]]:
-        """v1 payloads with one reading per summary window: 5-minute windows from the
-        start of the hour an hour ago, whole hours before that. Windows never overlap,
-        and a window always comes back under the same timestamp, so the map can merge
-        polls by timestamp like it does with raw readings."""
-        now = datetime.now(timezone.utc)
-        since_dt = (datetime.strptime(iso_utc(since), "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
-                    if since else now - timedelta(hours=24))
-        split = (now - timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-        fmt = "%Y-%m-%dT%H:%M:%S.000Z"
-        queries = []
-        if since_dt < split:  # whole hours that end after `since`
-            queries.append((3600, (since_dt - timedelta(hours=1)).strftime(fmt), split.strftime(fmt), 3600))
-        lo = max(since_dt, split) - timedelta(seconds=300)
-        queries.append((300, lo.strftime(fmt), "9999", 300))
-        stations: Dict[str, Dict[str, Any]] = {}
+        """Summarised payloads for the map; see summaries.summary_plan()."""
+        since_dt, plan = summary_plan(since)
+        rows: List[Dict[str, Any]] = []
         with self._lock:
-            for res, lo_ts, hi_ts, length in queries:
-                rows = self._conn.execute(
-                    "SELECT * FROM agg WHERE res=? AND start_ts>? AND start_ts<? ORDER BY start_ts",
-                    (res, lo_ts, hi_ts)).fetchall()
-                for r in rows:
-                    end = datetime.strptime(r["start_ts"], fmt).replace(tzinfo=timezone.utc) + timedelta(seconds=length)
-                    if end <= since_dt or r["valid_s"] <= 0 or r["e_sum"] <= 0:
-                        continue
-                    st = stations.setdefault(r["station_id"], {
-                        "v": 1, "station_id": r["station_id"], "lat": r["lat"], "lon": r["lon"],
-                        "summarised": True, "readings": []})
-                    if r["lat"] is not None:
-                        st["lat"], st["lon"] = r["lat"], r["lon"]
-                    w = r["valid_s"]
-                    src = json.loads(r["src"])
-                    total = sum(src.values())
-                    st["readings"].append({
-                        "minute": r["start_ts"].replace(".000Z", "Z"),
-                        "duration_s": round(r["duration_s"], 1),
-                        "valid_s": round(w, 1),
-                        "laeq_db": round(10 * math.log10(r["e_sum"] / w), 1),
-                        "lmax_db": None if r["lmax"] is None else round(r["lmax"], 1),
-                        "l90_db": round(r["l90_sum"] / w, 1),
-                        "sources": {k: round(v / total, 3) for k, v in sorted(src.items(), key=lambda kv: -kv[1])}
-                        if total > 0 else {},
-                        "flags": sorted(json.loads(r["flags"])),
-                        "n": r["n"],
-                    })
-        return list(stations.values())
+            for res, lo_ts, hi_ts in plan:
+                for r in self._conn.execute(
+                        "SELECT * FROM agg WHERE res=? AND start_ts>? AND start_ts<? ORDER BY start_ts",
+                        (res, lo_ts, hi_ts)):
+                    row = dict(r)
+                    row["src"], row["flags"] = json.loads(row["src"]), json.loads(row["flags"])
+                    rows.append(row)
+        return summary_payloads(rows, since_dt)
 
     def readings_since(self, since: Optional[str]) -> List[Dict[str, Any]]:
         sql, args = "SELECT payload FROM readings", ()
@@ -486,8 +408,7 @@ def make_handler(store: Any, upload_key: str, quiet: bool = False):
                 qs = parse_qs(url.query)
                 since = qs.get("since", [None])[0]
                 try:
-                    # MongoStore keeps no summaries, so it always serves raw payloads.
-                    if qs.get("raw", ["0"])[0] in ("1", "true") or not hasattr(store, "summaries_since"):
+                    if qs.get("raw", ["0"])[0] in ("1", "true"):
                         self._json(200, {"payloads": store.readings_since(since)})
                     else:
                         self._json(200, {"payloads": store.summaries_since(since)})
@@ -568,8 +489,8 @@ def main() -> None:
         print(f"[Noise Map] storing data in MongoDB, database {db_name!r}")
     else:
         store = SqliteStore(args.db)
-        store.raw_hours = args.raw_hours or None
         print(f"[Noise Map] storing data in {args.db}")
+    store.raw_hours = args.raw_hours or None
     upload_key = os.environ.get("NOISE_MAP_KEY", "")
     if not upload_key:
         print("[Noise Map] NOISE_MAP_KEY is not set: anyone can upload")

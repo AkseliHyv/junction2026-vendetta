@@ -29,6 +29,7 @@ import heapq
 import http.client
 import json
 import math
+import os
 import random
 import subprocess
 import sys
@@ -238,7 +239,7 @@ def load_specs(path: Path, generate: int, seed: int) -> List[Dict[str, Any]]:
 class Sender:
     """POSTs payloads to /api/readings. One keep-alive connection per thread."""
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, key: str = "") -> None:
         u = urlparse(url)
         if u.scheme not in ("http", "https"):
             raise ValueError(f"bad --server URL {url!r}")
@@ -247,6 +248,9 @@ class Sender:
         if not self.path.endswith("/api/readings"):
             self.path += "/api/readings"
         self.url = f"{u.scheme}://{u.netloc}{self.path}"
+        self.headers = {"Content-Type": "application/json"}
+        if key:
+            self.headers["Authorization"] = f"Bearer {key}"
         self._local = threading.local()
 
     def _conn(self) -> http.client.HTTPConnection:
@@ -260,7 +264,7 @@ class Sender:
         body = json.dumps(payload).encode("utf-8")
         conn = self._conn()
         try:
-            conn.request("POST", self.path, body=body, headers={"Content-Type": "application/json"})
+            conn.request("POST", self.path, body=body, headers=self.headers)
             resp = conn.getresponse()
             data = resp.read()
         except Exception:
@@ -580,10 +584,12 @@ def run_processes(args: argparse.Namespace) -> None:
     base = [sys.executable, str(Path(__file__).resolve())]
     passthrough = []
     for k, v in vars(args).items():
-        if k in ("processes", "shard", "status_port", "preview") or v in (None, False):
+        if k in ("processes", "shard", "status_port", "preview", "key") or v in (None, False):
             continue
         flag = "--" + k.replace("_", "-")
         passthrough += [flag] if v is True else [flag, str(v)]
+    if args.key:  # children read it from the environment, so it stays out of `ps`
+        os.environ["NOISE_MAP_KEY"] = args.key
     ports = [args.status_port + 1 + i if args.status_port else 0 for i in range(n)]
     if args.backfill_hours > 0:
         # Live shards start right away; N more processes compute the history up to this moment,
@@ -674,6 +680,8 @@ def run_processes(args: argparse.Namespace) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Mock Night-Noise Boxes uploading to the map server")
     ap.add_argument("--server", default="http://localhost:8080", help="map server base URL (or full .../api/readings)")
+    ap.add_argument("--key", default=os.environ.get("NOISE_MAP_KEY", ""),
+                    help="upload key, sent as 'Authorization: Bearer <key>' (default: $NOISE_MAP_KEY)")
     ap.add_argument("--devices", default=str(HERE / "devices.json"), help="device list (JSON)")
     ap.add_argument("--generate", type=int, default=0, metavar="N", help="add N generated boxes around the listed ones")
     ap.add_argument("--limit", type=int, default=0, metavar="N", help="only run the first N boxes")
@@ -719,7 +727,7 @@ def main() -> None:
 
     if args.reading_seconds <= 0 or args.analysis_seconds < args.reading_seconds:
         raise SystemExit("need 0 < --reading-seconds <= --analysis-seconds")
-    sender = Sender(args.server)
+    sender = Sender(args.server, args.key)
     fleet = Fleet(devices, sender, args.analysis_seconds, args.reading_seconds, args.senders, not args.quiet)
     if args.backfill_only:
         print(f"[Fleet] backfill: {args.backfill_hours:g} h of history for {len(devices)} boxes "

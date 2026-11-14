@@ -1,0 +1,25 @@
+# systemd unit for the map server. Install with:
+#   sudo cp server/deploy/noise-map.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now noise-map
+# Secrets are read from /opt/noise-map/server/.env.
+
+[Unit]
+Description=Noise map server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=noisemap
+WorkingDirectory=/opt/noise-map
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/noise-map/venv/bin/python server/server.py --host 127.0.0.1 --port 8080 --no-seed
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/noise-map/server
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

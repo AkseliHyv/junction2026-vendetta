@@ -5,6 +5,9 @@ message, update both ends and this file.
 
 ## Box → map server
 
+If the server has `NOISE_MAP_KEY` set, every POST must send
+`Authorization: Bearer <key>`, otherwise it gets a 401. GET requests are public.
+
 ### Analysis payload (analysis mode)
 
 `POST /api/readings`, one per analysis. The server stores it as-is and keeps

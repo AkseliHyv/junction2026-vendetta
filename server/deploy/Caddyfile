@@ -1,0 +1,7 @@
+# Caddy fetches an HTTPS certificate for this name automatically.
+# No domain? Use the server's IP with sslip.io, e.g. 203.0.113.7.sslip.io
+# Install with:  sudo cp server/deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+your-domain.example {
+	encode gzip
+	reverse_proxy 127.0.0.1:8080
+}

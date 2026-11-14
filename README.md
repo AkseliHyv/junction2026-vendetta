@@ -26,8 +26,12 @@ numbers are sent.
 - Modulino Pixels on the Qwiic port, for the LED loudness bar (optional)
 - A computer on the same network as the board, to run the server
 
-Everything on the computer side is the Python 3 standard library. There's
-nothing to install.
+Running the server locally needs only Python 3. To store data in MongoDB
+instead of a local SQLite file, `pip install -r server/requirements.txt`.
+
+To host the server publicly on Vultr with MongoDB Atlas, see
+[server/deploy/README.md](server/deploy/README.md). The steps below are for
+running everything on your own network.
 
 ## Running it
 
@@ -45,6 +49,11 @@ needs it in the next step. If the board can't connect, check that port 8080
 isn't blocked by a firewall, and that the network doesn't isolate devices from
 each other (guest Wi-Fi often does; a phone hotspot is an easy workaround).
 
+Settings and secrets come from environment variables or `server/.env`
+(copy `server/.env.example`; it's ignored by git). Without `MONGODB_URI` the
+data goes to `server/noise_map.sqlite3`. Without `NOISE_MAP_KEY` anyone on the
+network can upload, which is fine at home but not on a public server.
+
 ### 2. Configure the box
 
 Edit `night-noise-box/python/config.py`:
@@ -56,8 +65,12 @@ DEVICE_LON = 24.8274
 READINGS_URL = "http://<your computer's IP>:8080/api/readings"
 ```
 
-App Lab starts the app without command-line arguments, so `config.py` is the
-only way to configure the board.
+If the server has a `NOISE_MAP_KEY`, put the same value in
+`night-noise-box/.env` (copy `night-noise-box/.env.example`). It's ignored by
+git and `deploy.sh` copies it to the board.
+
+App Lab starts the app without command-line arguments, so these two files are
+the only way to configure the board.
 
 ### 3. Copy the app to the board and run it
 
@@ -171,6 +184,8 @@ night-noise-box/          the App Lab app that runs on the board
 mock-devices/             simulated boxes that upload like real ones (load testing)
 server/
   server.py               receives uploads and serves the map
+  mongo_store.py          MongoDB storage, used when MONGODB_URI is set
+  deploy/                 systemd unit, Caddyfile and hosting steps
   static/                 the map (see static/README.md)
 PROTOCOL.md               message formats between the parts
 ```

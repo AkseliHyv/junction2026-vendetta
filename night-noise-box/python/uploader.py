@@ -20,6 +20,8 @@ import urllib.request
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 
+from config import NOISE_MAP_KEY
+
 MAX_PENDING = 500
 MAX_BATCH = 50
 TIMEOUT_SEC = 5.0
@@ -70,9 +72,10 @@ class _BackgroundPoster:
 
     def _post(self, batch: List[Dict[str, Any]]) -> None:
         body = json.dumps(self._body(batch)).encode("utf-8")
-        req = urllib.request.Request(
-            self.url, data=body, method="POST", headers={"Content-Type": "application/json"}
-        )
+        headers = {"Content-Type": "application/json"}
+        if NOISE_MAP_KEY:
+            headers["Authorization"] = f"Bearer {NOISE_MAP_KEY}"
+        req = urllib.request.Request(self.url, data=body, method="POST", headers=headers)
         with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
             if resp.status >= 300:
                 raise urllib.error.HTTPError(self.url, resp.status, "upload rejected", resp.headers, None)

@@ -3,7 +3,22 @@ how you configure the board."""
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Dict, TypedDict
+
+
+def _env_file(path: Path) -> Dict[str, str]:
+    """KEY=VALUE lines from a .env file, if it exists."""
+    values: Dict[str, str] = {}
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                values[key.strip()] = value.strip().strip("'\"")
+    return values
+
 
 # --- Identity and server ---
 
@@ -11,8 +26,15 @@ DEVICE_ID: str = "box-01"
 DEVICE_LAT: float = 60.15675541136981  # where the box is; this is where it shows up on the map
 DEVICE_LON: float = 24.630079696276763
 
-READINGS_URL: str = "http://192.168.127.235:8080/api/readings"  # "" = print only, don't upload
-UPLOAD_URL: str = "http://192.168.127.235:8080/api/events"  # events mode only; "" = offline
+READINGS_URL: str = "https://70-34-222-243.sslip.io/api/readings"  # "" = print only, don't upload
+UPLOAD_URL: str = "https://70-34-222-243.sslip.io/api/events"  # events mode only; "" = offline
+
+# Shared key the server checks on uploads. Not kept in this file: set the
+# NOISE_MAP_KEY environment variable, or put NOISE_MAP_KEY=... in
+# night-noise-box/.env (ignored by git, copied to the board by deploy.sh).
+NOISE_MAP_KEY: str = os.environ.get("NOISE_MAP_KEY") or _env_file(Path(__file__).resolve().parent.parent / ".env").get(
+    "NOISE_MAP_KEY", ""
+)
 
 # "analysis": measure for ANALYSIS_SECONDS, upload a summary, repeat.
 # "events":   the older pipeline where the STM32 detects noise events and the

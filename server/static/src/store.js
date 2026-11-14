@@ -80,7 +80,7 @@ NM.store = (function () {
       l90: l90s.length ? l90s[l90s.length >> 1] : null, // median of per-minute L90s (approximation)
       sources,
       validS: wSum,
-      totalS: entries.length * 60,
+      totalS: entries.reduce((a, [, r]) => a + len(r), 0),
       minutes: entries.length,
       flags: [...flags],
     };
@@ -93,7 +93,9 @@ NM.store = (function () {
     let last = -Infinity;
     for (const t of map.keys()) if (t > last) last = t;
     const winMs = NM.config.windowMinutes * T.MIN;
-    const end = last + T.MIN;
+    // A reading covers at least a minute; the server's 5-minute summaries cover their duration_s.
+    const lastDur = Number(map.get(last).duration_s) * 1000;
+    const end = last + Math.max(T.MIN, Number.isFinite(lastDur) ? lastDur : 0);
     const entries = [...map].filter(([t]) => t >= end - winMs && t < end);
     const agg = aggregate(entries);
     return {

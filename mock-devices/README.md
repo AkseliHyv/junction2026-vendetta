@@ -11,21 +11,33 @@ python3 server/server.py --no-seed --db /tmp/noise_map_mock.sqlite3
 python3 mock-devices/mock_fleet.py                       # 36 boxes around Helsinki and Espoo
 ```
 
+Or the whole capital region, 3,000 boxes on real buildings (see "The city"):
+
+```bash
+python3 server/server.py --no-seed --quiet --raw-hours 1 --db /tmp/noise_map_city.sqlite3
+python3 mock-devices/mock_fleet.py --city --processes 4 --backfill-hours 6 --quiet
+```
+
 Open http://localhost:8080 for the map and http://localhost:8090 for the fleet.
 
 Use a separate `--db` for the server: `server/noise_map.sqlite3` is in git, and
-36 boxes add about 300,000 rows a day.
+36 boxes add about 300,000 rows a day. 3,000 boxes send ~26 million payloads
+a day (tens of GB), hence `--raw-hours 1`: the server keeps only the last hour
+of raw payloads, next to its 5-minute and hourly summaries (about 1 GB).
 
 ## Options
 
 | Option | Default | |
 | --- | --- | --- |
 | `--server URL` | `http://localhost:8080` | map server |
+| `--city` | | run the 3,000 boxes in `city/devices.json` instead of `--devices` |
+| `--processes N` | 1 | split the fleet over N processes; with `--backfill-hours`, N more compute the history alongside |
 | `--generate N` | 0 | add N generated boxes, scattered ~1 km around the listed ones |
 | `--limit N` | all | only the first N boxes |
 | `--shard I/N` | `0/1` | run every N-th box starting at I (see "Scale") |
 | `--analysis-seconds`, `--reading-seconds` | 10, 10 | same as `ANALYSIS_SECONDS` / `READING_SECONDS` on the box. `900` and `60` give the map's original 15 one-minute readings per upload |
-| `--backfill-hours H` | 0 | first send H hours (max 24) of history, as 15 one-minute readings per payload, so the 24 h chart has something in it |
+| `--backfill-hours H` | 0 | also send H hours (max 24) of history, as 15 one-minute readings per payload, so the 24 h chart has something in it |
+| `--backfill-only` | | send the history and exit, no live uploads |
 | `--senders N` | 8 | parallel upload threads |
 | `--status-port` | 8090 | 0 turns the status page off |
 | `--seed` | 2026 | same seed, same sound |
@@ -78,6 +90,63 @@ figures):
 | courtyard | 39 | 47 | 39 |
 | forest park | 38 | 50 | 36 |
 
+## The city
+
+`--city` runs 3,000 boxes on real buildings in Helsinki, Espoo, Vantaa and
+Kauniainen, built from OpenStreetMap. Instead of a site profile, each box
+hears the actual roads, rail lines, bars, schools, building sites, venues,
+ferries and flight paths around it, and boxes near each other hear the same
+cars, trams and planes.
+
+- **Placement.** 90 % of the boxes are on homes (apartment blocks weighted by
+  floors, so the inner city gets more), 10 % on hotspots: next to motorways
+  and main roads or within 50 m of a bar. Each box is on a facade, on a random
+  floor, facing the street or the yard (the building itself then screens the
+  street by about 12 dB).
+- **Roads.** Every road segment within earshot, by class: peak flow per
+  direction, speed limit (OSM `maxspeed`), share of lorries and buses (for
+  example a primary road: 800 vehicles/h, 5 % heavy, 18 buses/h). Vehicles are
+  generated per segment and direction and heard one by one as they pass:
+  distance, how much of the road the box sees, screening by buildings in
+  between, ground absorption, studded tyres from November to March. Traffic
+  further away (300 m to 1.5 km) becomes the background level.
+- **Rail.** Trams, metro and trains from the route relations, on their real
+  track, silent in tunnels, with timetable headways and delays.
+- **Points.** Bars and nightclubs (crowds, closing time, music), schools and
+  kindergartens (breaks, drop-off), building sites (weekday hours, not every
+  site active), stadiums and arenas (event nights with crowds arriving and
+  leaving), ferries (manoeuvring, horns, cars driving off).
+- **Flights.** Helsinki-Vantaa's runways: arrivals and departures along the
+  extended centrelines, two runway ends active at a time.
+- **The box itself.** Neighbours, children in the yard, dogs, parking cars,
+  the occasional refuse lorry, ventilation in dense blocks, and the same mic
+  errors, dropouts and outages as the 36-box fleet. Also city-wide: about 2 %
+  of hours one district (0.6-1.8 km across) loses power or Wi-Fi for 20-90
+  minutes.
+
+Every sound comes from a seeded stream per emitter and time slot, so shards
+and restarts hear the same city.
+
+### Rebuilding the city
+
+`city/devices.json` and `city/emitters.json` are committed; rebuild only to
+change the placement or the OSM data. Download the Finland extract once,
+cut the capital region and convert it ([osmium](https://osmcode.org/osmium-tool/),
+`brew install osmium-tool`, and the `osmium` Python package):
+
+```bash
+curl -LO https://download.geofabrik.de/europe/finland-latest.osm.pbf          # ~780 MB
+osmium extract -b 24.40,60.05,25.37,60.42 -s complete_ways -o capital.osm.pbf finland-latest.osm.pbf
+python3 -m venv /tmp/osm_venv && /tmp/osm_venv/bin/pip install osmium
+/tmp/osm_venv/bin/python mock-devices/city/osm_from_pbf.py capital.osm.pbf     # ~1 min
+python3 mock-devices/city/build_city.py                                       # ~20 s
+```
+
+`build_city.py --count N --hotspots 0.1 --seed S` places a different number of
+boxes. `city/osm_fetch.py` gets the same data from the Overpass API instead,
+but the public servers are often too busy for the building queries. Map data
+(c) OpenStreetMap contributors, ODbL.
+
 ## Adding boxes
 
 Edit `devices.json`. Each box needs `id`, `lat`, `lon` and `profile` (a key of
@@ -89,27 +158,27 @@ types go in `PROFILES`, new kinds of sound in `CONFUSION`.
 
 ## Scale
 
-One process runs about 1,000 boxes at 10 s uploads (~100 uploads/s) on ~20 %
-of one CPU core. A process falling behind says so in its 30 s log line. Above
-a few thousand boxes, split the fleet across processes. Each shard gets a
-different set of boxes, the same weather, and needs its own status port:
+A process falling behind says so in its 30 s log line (`behind by`). Each
+shard gets a different set of boxes and the same weather and city;
+`--processes N` starts N shards and serves their combined status on
+`--status-port`.
 
-```bash
-for i in 0 1 2 3; do
-  python3 mock-devices/mock_fleet.py --generate 10000 --shard $i/4 --status-port $((8090 + i)) --quiet &
-done
-```
+Measured on an 8 GB laptop with 3,000 city boxes, `--processes 4`:
 
-What the map server did in testing (36 and 1,036 boxes):
-
-- `GET /api/readings` returns at most 5,000 payloads. With 1,036 boxes that is
-  under a minute of data, so the map's 15-minute windows and 24 h chart only
-  cover that last minute. The server now returns the newest 5,000 (it used to
-  return the oldest, which left the map with stale data after ~23 minutes of
-  36 boxes). Big fleets need aggregation on the server side.
-- `ThreadingHTTPServer` accepts 5 waiting connections; bursts of uploads
-  sometimes get `Connection reset`. The mock boxes retry, like real ones.
-- Every upload is a separate SQLite commit.
+- Live: 300 uploads/s, each shard ~16 % of a core and ~100 MB, no lag. The
+  map server uses ~4 % of a core; `GET /api/readings` returns 3,000 stations
+  in ~130 kB (gzipped) in ~70 ms. With 6 h of history: ~1.7 MB, ~1.7 s.
+- Backfill: about 0.07 CPU-seconds per box-hour. With `--processes`, 4 extra
+  processes compute it alongside the live shards, uploading as they go, and
+  exit when done, so the map is live straight away and the history fills in
+  from the oldest hour. 6 h took 12.5 minutes, with the laptop short of
+  memory. Meanwhile the map server couldn't keep up with live and history
+  together: live uploads queued (no data lost, the boxes buffer) and caught up
+  within a minute after the backfill. On a smaller machine use fewer
+  `--backfill-hours`.
+- The map server summarises (see [PROTOCOL.md](../PROTOCOL.md)): one row per
+  station per hour for older data, per 5 minutes for the last hour or so.
+  `--raw-hours` limits how long the raw payloads are kept.
 
 ## Status and control
 

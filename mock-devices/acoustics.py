@@ -134,6 +134,18 @@ CURVES: Dict[str, Dict[str, List[float]]] = {
         "wd": _c(.05, .02, 0, 0, .02, .15, .70, 1, .60, .30, .20, .20, .25, .25, .25, .30, .50, .80, .90, .80, .60, .45, .30, .15),
         "we": _c(.08, .04, 0, 0, 0, .05, .20, .50, .80, .90, .70, .50, .40, .40, .45, .50, .60, .70, .80, .70, .55, .45, .30, .15),
     },
+    # Daycare outdoor play: mid-morning and afternoon, weekdays.
+    "daycare": {
+        "wd": _c(0, 0, 0, 0, 0, 0, 0, 0, .10, .60, 1, .60, .10, .05, .40, 1, .80, .20, 0, 0, 0, 0, 0, 0),
+        "we": [0.0] * 24,
+    },
+    # Bars closing: people pour out around 02-04 on Friday and Saturday nights.
+    "closing": {
+        "wd": _c(.10, .15, .10, .02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, .05),
+        "fri": _c(.20, .30, .20, .05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, .05),
+        "sat": _c(.40, .70, 1, .80, .30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, .05),
+        "sun": _c(.40, .70, 1, .80, .30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+    },
     # Building ventilation: always on, a little higher in office hours.
     "hvac": {"wd": _c(*([.85] * 7 + [1] * 11 + [.85] * 6)), "we": [0.85] * 24},
     "always": {"wd": [1.0] * 24},
@@ -398,14 +410,14 @@ class Event:
     size: float
     lp: float
     hits_per_s: float
+    start: float = field(init=False)
+    end: float = field(init=False)
 
-    @property
-    def start(self) -> float:
-        return self.t0 - 6 * self.size if self.shape == "pass" else self.t0
-
-    @property
-    def end(self) -> float:
-        return self.t0 + (6 * self.size if self.shape == "pass" else self.size)
+    def __post_init__(self) -> None:
+        if self.shape == "pass":
+            self.start, self.end = self.t0 - 6 * self.size, self.t0 + 6 * self.size
+        else:
+            self.start, self.end = self.t0, self.t0 + self.size
 
     def level(self, t: float, block_s: float, rng: random.Random) -> Optional[float]:
         if t < self.start or t >= self.end:
@@ -489,7 +501,11 @@ class SiteSound:
                 t_first = start + rng.random() * (until - start)
                 t0 = t_first + 6 * size if src.shape == "pass" else t_first
                 self.events.append(Event(src.kind, src.shape, t0, size, lp, src.hits_per_s))
+        self._spawn_extra(start, until)
         self._spawned_until = until
+
+    def _spawn_extra(self, start: float, until: float) -> None:
+        """Hook for sounds that don't come from the profile (see city/world.py)."""
 
     def background_db(self, t: float) -> float:
         p = self.profile

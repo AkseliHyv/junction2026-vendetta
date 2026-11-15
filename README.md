@@ -187,5 +187,17 @@ server/
   mongo_store.py          MongoDB storage, used when MONGODB_URI is set
   deploy/                 systemd unit, Caddyfile and hosting steps
   static/                 the map (see static/README.md)
+  static/game/            link to Noise Hunt's web/ (separate repo), served at /game
 PROTOCOL.md               message formats between the parts
 ```
+
+## The game
+
+`https://<server>/game` is **Noise Hunt**: walk through central Helsinki or
+around Hype Areena in first person, check the live map on an in-game phone,
+go where it's loud and find out what's making the noise. It reads the same
+`/api/readings` as the map, so it shows whatever the boxes (or the mock fleet)
+are uploading, and simulates the mock boxes when nothing is. It lives in its
+own repo, [AkseliHyv/noise-hunt](https://github.com/AkseliHyv/noise-hunt):
+clone it next to this one and run
+`ln -s ~/Projects/noise-hunt/web server/static/game`.

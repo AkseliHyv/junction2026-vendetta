@@ -313,6 +313,6 @@ NM.map = (function () {
     map.easeTo({ center: [pos.lon, pos.lat], zoom, offset: [0, targetY - h / 2], duration: 450 });
   }
 
-  // debug(): the MapLibre map, for poking at it from the console while experimenting.
-  return { init, refresh, setView, select, setUser, reveal, VIEWS, debug: () => map };
+  function noAutoFit() { fitted = true; }
+  return { init, refresh, setView, select, setUser, reveal, VIEWS, noAutoFit, debug: () => map };
 })();

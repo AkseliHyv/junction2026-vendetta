@@ -50,11 +50,12 @@ def iso_z(dt: datetime) -> str:
 
 
 class MongoStore:
-    def __init__(self, uri: str, db_name: str = "noise_map") -> None:
+    def __init__(self, uri: str, db_name: str = "noise_map", readings_days: float = 0) -> None:
         self._client = MongoClient(uri, serverSelectionTimeoutMS=10_000, appname="noise-map")
         self._client.admin.command("ping")  # fail at startup, not on the first upload
         db = self._client[db_name]
         self._create_readings(db)
+        self._expire_readings(db, readings_days)
         self.readings = db["readings"]
         self.stations = db["stations"]
         self.events = db["events"]
@@ -81,6 +82,22 @@ class MongoStore:
             print(f"[Noise Map] time-series collection not available ({exc}); using a normal one")
             db.create_collection("readings")
             db["readings"].create_index([("t", ASCENDING)])
+
+    @staticmethod
+    def _expire_readings(db: Any, days: float) -> None:
+        """Let MongoDB delete readings older than `days` by itself (0 = keep forever).
+        Keeps the database inside a free-tier storage limit when boxes upload nonstop."""
+        info = db.command("listCollections", filter={"name": "readings"})["cursor"]["firstBatch"][0]
+        seconds = int(days * 86400)
+        if seconds == info.get("options", {}).get("expireAfterSeconds", 0):
+            return
+        try:
+            if "timeseries" in info.get("options", {}):
+                db.command("collMod", "readings", expireAfterSeconds=seconds if seconds else "off")
+            elif seconds:
+                db["readings"].create_index([("t", ASCENDING)], name="t_ttl", expireAfterSeconds=seconds)
+        except OperationFailure as exc:
+            print(f"[Noise Map] couldn't set readings expiry ({exc}); old readings won't be deleted")
 
     # --- Readings (analysis mode) ---
 

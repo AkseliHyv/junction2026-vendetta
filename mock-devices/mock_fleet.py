@@ -685,6 +685,7 @@ def main() -> None:
     ap.add_argument("--devices", default=str(HERE / "devices.json"), help="device list (JSON)")
     ap.add_argument("--generate", type=int, default=0, metavar="N", help="add N generated boxes around the listed ones")
     ap.add_argument("--limit", type=int, default=0, metavar="N", help="only run the first N boxes")
+    ap.add_argument("--ids", metavar="FILE", help="only run the boxes listed in FILE, one id per line (see game-boxes.txt)")
     ap.add_argument("--shard", default="0/1", metavar="I/N", help="run every N-th box starting at I (one process per shard)")
     ap.add_argument("--analysis-seconds", type=float, default=10.0, help="one upload per this many seconds (box: ANALYSIS_SECONDS)")
     ap.add_argument("--reading-seconds", type=float, default=10.0, help="length of each reading (box: READING_SECONDS)")
@@ -712,6 +713,13 @@ def main() -> None:
         specs, world = load_city(args.seed, weather)
     else:
         specs = load_specs(Path(args.devices), args.generate, args.seed)
+    if args.ids:
+        wanted = [l.strip() for l in Path(args.ids).read_text().splitlines() if l.strip() and not l.startswith("#")]
+        known = {s["id"] for s in specs}
+        unknown = [w for w in wanted if w not in known]
+        if unknown:
+            print(f"[Fleet] {len(unknown)} ids in {args.ids} aren't in the device list, e.g. {unknown[0]}", flush=True)
+        specs = [s for s in specs if s["id"] in set(wanted)]
     if args.limit:
         specs = specs[: args.limit]
     i, n = (int(x) for x in args.shard.split("/"))

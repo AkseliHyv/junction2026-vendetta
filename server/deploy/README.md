@@ -63,8 +63,6 @@ systemctl reload caddy
 If the VM has a firewall enabled (`ufw status`), allow `22`, `80` and `443`.
 Port 8080 stays closed; only Caddy talks to the server.
 
-To update later: `cd /opt/noise-map && sudo -u noisemap git pull && systemctl restart noise-map`.
-
 ## 3. Boxes
 
 In `night-noise-box/python/config.py`:
@@ -81,6 +79,41 @@ NOISE_MAP_KEY=...
 
 Then `night-noise-box/deploy.sh <board>` and press Run in App Lab. `deploy.sh`
 copies the `.env` file to the board along with the app.
+
+## Demo fleet
+
+`mock-fleet.service` runs the mock boxes listed in `mock-devices/demo-boxes.txt`
+nonstop, so the map always has data, with one upload per box every 5 minutes.
+
+```bash
+cp /opt/noise-map/server/deploy/mock-fleet.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now mock-fleet
+journalctl -u mock-fleet -f
+```
+
+To change which boxes run, edit `demo-boxes.txt` and `systemctl restart mock-fleet`.
+
+### Staying inside the Atlas free tier
+
+The free cluster has 512 MB of storage and a limit on operations per second.
+With ~140 boxes uploading every 5 minutes the database levels off at about
+200 MB, because `noise-map.service` keeps raw payloads for 1 hour
+(`--raw-hours 1`) and individual readings for 2 days (`--readings-days 2`).
+The 5-minute and hourly summaries are kept 8 days (`AGG_KEEP_DAYS` in
+`server/summaries.py`) and take the most space as the fleet grows: each box
+adds roughly 1 MB of summaries per 8 days and 0.4 MB of readings per 2 days.
+Watch storage and operations under the cluster's **Metrics** tab in Atlas.
+
+## Updating
+
+```bash
+cd /opt/noise-map && sudo -u noisemap git pull && sudo -u noisemap git -C /opt/noise-hunt pull
+cp server/deploy/noise-map.service server/deploy/mock-fleet.service /etc/systemd/system/
+systemctl daemon-reload && systemctl restart noise-map mock-fleet
+```
+
+Copying the service files every time is what keeps them in step with the code
+(for example when a file they point to is renamed).
 
 ## Checking it
 

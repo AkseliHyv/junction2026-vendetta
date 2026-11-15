@@ -685,7 +685,7 @@ def main() -> None:
     ap.add_argument("--devices", default=str(HERE / "devices.json"), help="device list (JSON)")
     ap.add_argument("--generate", type=int, default=0, metavar="N", help="add N generated boxes around the listed ones")
     ap.add_argument("--limit", type=int, default=0, metavar="N", help="only run the first N boxes")
-    ap.add_argument("--ids", metavar="FILE", help="only run the boxes listed in FILE, one id per line (see game-boxes.txt)")
+    ap.add_argument("--ids", metavar="FILE", help="only run the boxes listed in FILE, one id per line (see demo-boxes.txt)")
     ap.add_argument("--shard", default="0/1", metavar="I/N", help="run every N-th box starting at I (one process per shard)")
     ap.add_argument("--analysis-seconds", type=float, default=10.0, help="one upload per this many seconds (box: ANALYSIS_SECONDS)")
     ap.add_argument("--reading-seconds", type=float, default=10.0, help="length of each reading (box: READING_SECONDS)")

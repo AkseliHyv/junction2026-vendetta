@@ -1,4 +1,5 @@
-# Runs the Noise Hunt game's 141 mock boxes nonstop against the local map server.
+# The demo fleet: runs the mock boxes in mock-devices/demo-boxes.txt nonstop
+# against the local map server, so the map always has data to show.
 # Install with:
 #   sudo cp server/deploy/mock-fleet.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now mock-fleet
@@ -8,7 +9,7 @@
 # NOISE_MAP_KEY comes from server/.env.
 
 [Unit]
-Description=Mock Night-Noise Boxes
+Description=Demo fleet of mock Night-Noise Boxes
 After=noise-map.service
 Wants=noise-map.service
 
@@ -18,7 +19,7 @@ WorkingDirectory=/opt/noise-map
 EnvironmentFile=/opt/noise-map/server/.env
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/noise-map/venv/bin/python mock-devices/mock_fleet.py --city \
-    --ids mock-devices/game-boxes.txt --server http://127.0.0.1:8080 \
+    --ids mock-devices/demo-boxes.txt --server http://127.0.0.1:8080 \
     --analysis-seconds 300 --reading-seconds 60 --status-port 0 --quiet
 Restart=on-failure
 RestartSec=10

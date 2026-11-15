@@ -1,8 +1,14 @@
-# Mock boxes in the Noise Hunt game's zones (noise-hunt/web/zones/*.json).
-# The real box (box-01) is left out. The fleet service runs only these, to stay
-# inside the Atlas free tier:
-#   python3 mock-devices/mock_fleet.py --city --ids mock-devices/game-boxes.txt
-# If the game's zones change, regenerate this list from the zone files.
+# The demo fleet: mock boxes that run nonstop on the server (server/deploy/mock-fleet.service)
+#   python3 mock-devices/mock_fleet.py --city --ids mock-devices/demo-boxes.txt
+#
+# Kept to ~140 boxes so MongoDB Atlas's free tier (512 MB) is enough; all 3,000
+# city boxes would not fit. Right now these are the boxes in central Helsinki
+# and around Hype Areena, the two areas the Noise Hunt game also uses, taken from
+# noise-hunt/web/zones/*.json. The real box (box-01) is left out.
+#
+# Add or remove ids freely (from mock-devices/city/devices.json), then restart
+# the service. More boxes means more storage; see the free-tier notes in
+# server/deploy/README.md.
 
 # helsinki-centre
 city-0006-laivurinkatu

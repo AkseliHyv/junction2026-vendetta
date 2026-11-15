@@ -35,6 +35,7 @@ of raw payloads, next to its 5-minute and hourly summaries (about 1 GB).
 | `--processes N` | 1 | split the fleet over N processes; with `--backfill-hours`, N more compute the history alongside |
 | `--generate N` | 0 | add N generated boxes, scattered ~1 km around the listed ones |
 | `--limit N` | all | only the first N boxes |
+| `--ids FILE` | | only the boxes listed in FILE, one id per line (e.g. `demo-boxes.txt`, the server's demo fleet) |
 | `--shard I/N` | `0/1` | run every N-th box starting at I (see "Scale") |
 | `--analysis-seconds`, `--reading-seconds` | 10, 10 | same as `ANALYSIS_SECONDS` / `READING_SECONDS` on the box. `900` and `60` give the map's original 15 one-minute readings per upload |
 | `--backfill-hours H` | 0 | also send H hours (max 24) of history, as 15 one-minute readings per payload, so the 24 h chart has something in it |

@@ -107,6 +107,32 @@ NM.store = (function () {
     };
   }
 
+  /**
+   * The window ending at time `end`: readings that overlap [end − window, end).
+   * Older history may only exist as hourly summaries, so a reading counts when
+   * any part of its duration falls inside the window. null if there are none.
+   */
+  function at(id, end) {
+    const map = stations.get(id);
+    if (!map) return null;
+    const winMs = NM.config.windowMinutes * T.MIN;
+    const entries = [];
+    for (const e of map) {
+      const dur = Number(e[1].duration_s) * 1000;
+      const stop = e[0] + (Number.isFinite(dur) && dur > 0 ? dur : T.MIN);
+      if (e[0] < end && stop > end - winMs) entries.push(e);
+    }
+    const agg = aggregate(entries);
+    return agg && { ...agg, ok: true, start: end - winMs, end, stale: false };
+  }
+
+  /** Oldest reading time across all stations (−Infinity with no data). */
+  function oldestMinute() {
+    let first = Infinity;
+    for (const map of stations.values()) for (const t of map.keys()) if (t < first) first = t;
+    return Number.isFinite(first) ? first : -Infinity;
+  }
+
   /** Hourly LAeq for clock hours 0..23 over the last 24 h (null = no data). */
   function hourly(id, now = Date.now()) {
     const map = stations.get(id);
@@ -131,5 +157,5 @@ NM.store = (function () {
     return last;
   }
 
-  return { ingest, latest, hourly, newestMinute };
+  return { ingest, latest, at, hourly, newestMinute, oldestMinute };
 })();

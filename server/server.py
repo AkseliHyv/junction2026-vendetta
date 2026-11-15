@@ -476,6 +476,8 @@ def main() -> None:
     ap.add_argument("--reseed", action="store_true", help="Regenerate simulated test data")
     ap.add_argument("--raw-hours", type=float, default=0,
                     help="delete payloads older than this many hours (summaries stay %d days; 0 = keep all)" % AGG_KEEP_DAYS)
+    ap.add_argument("--readings-days", type=float, default=0,
+                    help="MongoDB only: delete individual readings older than this many days (0 = keep all)")
     ap.add_argument("--quiet", action="store_true", help="don't print a line per upload (for big mock fleets)")
     args = ap.parse_args()
 
@@ -485,7 +487,7 @@ def main() -> None:
         from mongo_store import MongoStore
 
         db_name = os.environ.get("MONGODB_DB", "noise_map")
-        store: Any = MongoStore(uri, db_name)
+        store: Any = MongoStore(uri, db_name, readings_days=args.readings_days)
         print(f"[Noise Map] storing data in MongoDB, database {db_name!r}")
     else:
         store = SqliteStore(args.db)

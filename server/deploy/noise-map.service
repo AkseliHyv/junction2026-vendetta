@@ -2,6 +2,7 @@
 #   sudo cp server/deploy/noise-map.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now noise-map
 # Secrets are read from /opt/noise-map/server/.env.
+# --raw-hours and --readings-days keep MongoDB Atlas inside the free tier's 512 MB.
 
 [Unit]
 Description=Noise map server
@@ -12,7 +13,8 @@ Wants=network-online.target
 User=noisemap
 WorkingDirectory=/opt/noise-map
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/noise-map/venv/bin/python server/server.py --host 127.0.0.1 --port 8080 --no-seed
+ExecStart=/opt/noise-map/venv/bin/python server/server.py --host 127.0.0.1 --port 8080 --no-seed \
+    --raw-hours 1 --readings-days 2
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true

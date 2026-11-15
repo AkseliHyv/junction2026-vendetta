@@ -20,6 +20,19 @@ Open `http://localhost:8080/?demo` to see it with made-up data from 8 stations i
    Readings with less than 20 s of valid audio per minute are ignored. A station silent for more than 40 min is shown grey, as offline.
 4. Tapping a station shows its latest level, a 24-hour chart, peak, background, valid audio, sound sources and flags.
 
+### Map views (experimental)
+
+The switcher in the corner picks how levels are drawn. The choice is kept in the URL (`?view=surface`), and so is the map position (`#at=zoom/lat/lon`), so a link reopens the same picture.
+
+| View | What it shows |
+| --- | --- |
+| **Glow** (default) | A soft 70 m circle per live station in its own level's colour. Overlaps blend; nothing is added up. |
+| **Surface** | The level estimated between stations: an inverse-distance average (in dB) of the stations within 250 m. Areas with no station nearby stay blank instead of looking quiet. Drawn under the roads. |
+| **Clusters** | Zoomed out, nearby stations merge into one bubble: fill = energy-average level, ring = the loudest station, number = average dB. Tap to zoom in. |
+| **Sources** | Like Glow, but coloured by the main noise source (traffic, voices, …). Brightness still follows the level. |
+
+The **time slider** replays the last 24 hours in 15-minute windows (▶ plays them in order); the map, the station sheet and the status all follow the chosen time. **Live** goes back to the newest data.
+
 ## Backend
 
 `server.py` implements this. To point the map at a different server, set `apiBase` in `index.html` or open the page with `?api=https://…/api`.
@@ -59,7 +72,7 @@ It returns payloads with readings newer than `since`, either as a bare array or 
 
 ## Basemap
 
-`NM_CONFIG.mapStyle` (in `index.html`) takes any MapLibre style URL. The default is `https://tiles.openfreemap.org/styles/dark`, which is free and needs no key. To use MapTiler, Stadia, etc., paste their style URL with your key, e.g. `https://api.maptiler.com/maps/dataviz-dark/style.json?key=…`. The heat glow is drawn under the style's labels.
+`NM_CONFIG.mapStyle` (in `index.html`) takes any MapLibre style URL. The default is `https://tiles.openfreemap.org/styles/dark`, which is free and needs no key. To use MapTiler, Stadia, etc., paste their style URL with your key, e.g. `https://api.maptiler.com/maps/dataviz-dark/style.json?key=…`. The glow is drawn under the style's labels, the surface under its roads.
 
 ## Files
 
@@ -69,6 +82,8 @@ It returns payloads with readings newer than `since`, either as a bare array or 
 | `src/data.js` | Stations and the colour scales |
 | `src/store.js` | Ingests device payloads, aggregates windows and hourly bars |
 | `src/api.js` / `src/mock.js` | Backend client / demo feed |
-| `src/map.js` | MapLibre map: stations, heat glow, markers |
+| `src/map.js` | MapLibre map: stations, the views above, markers |
+| `src/surface.js` | Builds the Surface view's image |
+| `src/controls.js` | View switcher, time slider, legend |
 | `src/sheet.js`, `src/search.js` | Station sheet and station search |
 | `src/app.js` | Wiring, the 15-minute refresh loop, my location |

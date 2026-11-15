@@ -9,6 +9,13 @@ NM.map = (function () {
   let selectionMarker = null, userMarker = null;
   let onTap = () => {};
 
+  // Glow radius around a station, in metres on the ground (constant at every
+  // zoom), and the smallest it may shrink to on screen when zoomed far out.
+  const GLOW_METERS = 70;
+  const GLOW_MIN_PX = 6;
+  // Metres per screen pixel at zoom 0 on the equator (512 px world).
+  const METERS_PER_PX_Z0 = 40075016.686 / 512;
+
   function init(el, opts = {}) {
     onTap = opts.onTap || onTap;
     map = new maplibregl.Map({
@@ -43,15 +50,24 @@ NM.map = (function () {
 
   function onLoad() {
     map.addSource('stations', { type: 'geojson', data: stationsGeoJSON() });
+    // Glow around each live station, coloured by that station's own level.
+    // Deliberately not a `heatmap` layer: a heatmap sums nearby points, so a
+    // cluster of quiet stations looked like one loud spot, and since its radius
+    // was in screen pixels the clusters (and the fake hot spots) changed with
+    // zoom. Each glow here has a fixed size on the ground and overlapping glows
+    // only blend; the louder station is drawn on top.
     map.addLayer({
-      id: 'stations-heat', type: 'heatmap', source: 'stations', filter: ['!', ['get', 'stale']],
+      id: 'stations-glow', type: 'circle', source: 'stations', filter: ['!', ['get', 'stale']],
+      layout: { 'circle-sort-key': ['get', 'db'] },
       paint: {
-        'heatmap-weight': ['interpolate', ['linear'], ['get', 'db'], 35, 0.1, 80, 1],
-        'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 1, 1, 13, 2],
-        'heatmap-radius': ['interpolate', ['exponential', 2], ['zoom'], 1, 12, 8, 30, 14, 80, 18, 160],
-        'heatmap-opacity': 0.8,
-        'heatmap-color': ['interpolate', ['linear'], ['heatmap-density'],
-          0, 'rgba(0,0,0,0)', 0.15, 'rgba(116,87,224,0.5)', 0.4, '#b453cc', 0.65, '#e8526c', 0.85, '#ff9f45', 1, '#ffd36a'],
+        'circle-radius': ['interpolate', ['exponential', 2], ['zoom'],
+          0, GLOW_MIN_PX,
+          12, ['max', GLOW_MIN_PX, ['*', ['get', 'r0'], 2 ** 12]],
+          22, ['*', ['get', 'r0'], 2 ** 22]],
+        'circle-color': ['interpolate', ['linear'], ['get', 'db'],
+          40, '#8a5ce6', 51.2, '#c057c4', 60.8, '#ec5f78', 71.2, '#ff9f45', 80, '#ffd98a'],
+        'circle-opacity': ['interpolate', ['linear'], ['get', 'db'], 40, 0.35, 80, 0.75],
+        'circle-blur': 1,
       },
     }, labelLayerId());
     map.addLayer({
@@ -103,7 +119,11 @@ NM.map = (function () {
       features: stations.map((s) => ({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
-        properties: { id: s.id, db: s.db, stale: !!s.stale, color: s.stale ? '#6b6d75' : NM.category(s.db).color },
+        properties: {
+          id: s.id, db: s.db, stale: !!s.stale, color: s.stale ? '#6b6d75' : NM.category(s.db).color,
+          // Glow radius in pixels at zoom 0; doubles with each zoom level.
+          r0: GLOW_METERS / (METERS_PER_PX_Z0 * Math.cos((s.lat * Math.PI) / 180)),
+        },
       })),
     };
   }

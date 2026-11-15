@@ -29,6 +29,17 @@
         </div>
       </header>
 
+      <div id="views" class="views" role="radiogroup" aria-label="Map view"></div>
+
+      <div id="timebar" class="timebar" data-live="true">
+        <button class="tb-play" type="button" aria-label="Play the last 24 hours" data-playing="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-play" d="M8 5.5v13l10-6.5z" /><path class="i-pause" d="M7.5 5.5h3v13h-3zM13.5 5.5h3v13h-3z" /></svg>
+        </button>
+        <input class="tb-range" type="range" aria-label="Time shown on the map" />
+        <span class="tb-time" aria-live="polite">Live</span>
+        <button class="tb-live" type="button" hidden>Live</button>
+      </div>
+
       <div class="legend" aria-label="Colour scale from 40 to 80 decibels">
         <span>40</span><i class="legend-bar"></i><span class="legend-max">80<br />dB</span>
       </div>
@@ -71,7 +82,9 @@
     <script src="src/store.js"></script>
     <script src="src/mock.js"></script>
     <script src="src/api.js"></script>
+    <script src="src/surface.js"></script>
     <script src="src/map.js"></script>
+    <script src="src/controls.js"></script>
     <script src="src/sheet.js"></script>
     <script src="src/search.js"></script>
     <script src="src/app.js"></script>

@@ -44,3 +44,19 @@ NM.barColor = function (db) {
   if (db < 75) return '#ff9f45';
   return '#ffd36a';
 };
+
+/* Colour scale of the map and legend: [dB, colour] stops (the legend bar's
+ * gradient in styles.css uses the same colours). */
+NM.LEVEL_STOPS = [[40, '#8a5ce6'], [51.2, '#c057c4'], [60.8, '#ec5f78'], [71.2, '#ff9f45'], [80, '#ffd98a']];
+
+/* What makes the noise: the classifier's labels (night-noise-box/python/audio.py,
+ * and the model's own "noise" class) plus the demo feed's "nature". Colours are kept clear of the level scale. */
+NM.SOURCES = {
+  traffic: { label: 'Traffic', color: '#4cc3f0' },
+  construction: { label: 'Construction', color: '#f4d35e' },
+  music: { label: 'Music', color: '#f25fa8' },
+  voices: { label: 'Voices', color: '#7bd88f' },
+  nature: { label: 'Nature', color: '#3fae8c' },
+  background: { label: 'Background', color: '#8d93a6' },
+  noise: { label: 'Other noise', color: '#c9a0ff' }, // the Edge Impulse model's catch-all class
+};

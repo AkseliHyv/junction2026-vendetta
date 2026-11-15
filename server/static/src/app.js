@@ -1,7 +1,7 @@
 /* Wiring: polls for data, and connects the map, the station sheet and search. */
 (function () {
   const U = NM.util, T = NM.time, D = NM.data;
-  const SOURCE_LABEL = { traffic: 'Traffic', construction: 'Construction', voices: 'Voices', nature: 'Nature' };
+  const SOURCE_LABEL = Object.fromEntries(Object.entries(NM.SOURCES).map(([k, s]) => [k, s.label]));
   const EMBED = new URLSearchParams(location.search).get('embed') === 'game' && window.parent !== window;
 
   let selected = null; // the station shown in the sheet: { id, lon, lat }
@@ -20,6 +20,7 @@
     flash(window.maplibregl ? 'This browser cannot show the map (WebGL off?)' : 'Map library failed to load');
   }
   NM.map.refresh([]);
+  NM.controls.init({ onView: (v) => NM.map.setView(v), onTime: () => recompute() });
   NM.sheet.init({ onClose: () => { selected = null; NM.map.select(null); } });
   NM.search.init({ onPick });
   document.getElementById('locate').addEventListener('click', locate);
@@ -39,6 +40,7 @@
       const { rejected } = NM.store.ingest(payloads);
       if (rejected) console.warn(`[noise-map] ${rejected} malformed payloads/readings skipped`);
       lastRefresh = Date.now();
+      NM.controls.setBounds(NM.store.oldestMinute(), NM.store.newestMinute());
       recompute();
     } catch (err) {
       console.error('[noise-map] refresh failed', err);
@@ -56,18 +58,31 @@
     timer = setTimeout(refresh, next - now);
   }
 
+  /** A station's window at the time the slider shows: the latest one when live. */
+  function statsFor(id, now = Date.now()) {
+    const t = NM.controls.time;
+    return t == null ? NM.store.latest(id, now) : NM.store.at(id, t);
+  }
+
   function recompute() {
     const now = Date.now();
-    const all = D.stations.map((st) => ({ ...st, stats: NM.store.latest(st.id, now) }));
+    const replay = NM.controls.time;
+    const all = D.stations.map((st) => ({ ...st, stats: statsFor(st.id, now) }));
     liveStations = all.filter((s) => s.stats && s.stats.ok && !s.stats.stale);
     const t = liveStations.length ? Math.max(...liveStations.map((s) => s.stats.end)) : now;
 
     NM.map.refresh(
-      all.filter((s) => s.stats && s.stats.ok).map((s) => ({ id: s.id, lon: s.lon, lat: s.lat, db: s.stats.laeq, stale: s.stats.stale }))
+      all.filter((s) => s.stats && s.stats.ok).map((s) => ({
+        id: s.id, lon: s.lon, lat: s.lat, db: s.stats.laeq, stale: s.stats.stale,
+        src: s.stats.sources && s.stats.sources[0] ? s.stats.sources[0][0] : '',
+      }))
     );
 
     const offline = all.length - liveStations.length;
-    if (liveStations.length) {
+    if (replay != null) {
+      setStatus('replay', `Replay · ${T.hhmm(replay - NM.config.windowMinutes * T.MIN)}–${T.hhmm(replay)}`,
+        `${liveStations.length} of ${all.length} sensors have data in this window`);
+    } else if (liveStations.length) {
       const label = NM.api.isDemo ? 'Demo data' : 'Live';
       setStatus(NM.api.isDemo ? 'demo' : 'live', `${label} · updated ${T.hhmm(t)}`,
         `${liveStations.length} of ${all.length} sensors reporting` + (offline ? ` · ${offline} offline` : ''));
@@ -116,7 +131,7 @@
     if (!hit) return;
     const now = Date.now();
     const st = D.stations.find((s) => s.id === hit.id);
-    const stats = st && NM.store.latest(st.id, now);
+    const stats = st && statsFor(st.id, now);
     if (!stats || !stats.ok) return;
     selected = hit;
     const top = stats.sources[0];

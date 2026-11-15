@@ -5,3 +5,6 @@ __pycache__/
 
 # Secrets: keys and connection strings live here, never in git
 .env
+
+# Noise Hunt lives in its own repo (AkseliHyv/noise-hunt); symlink its web/ here
+server/static/game

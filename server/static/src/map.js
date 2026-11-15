@@ -180,5 +180,8 @@ NM.map = (function () {
     map.easeTo({ center: [pos.lon, pos.lat], zoom, offset: [0, targetY - h / 2], duration: 450 });
   }
 
-  return { init, refresh, select, setUser, reveal };
+  /** Keep the current view instead of zooming out to all stations on the first data. */
+  function noAutoFit() { fitted = true; }
+
+  return { init, refresh, select, setUser, reveal, noAutoFit };
 })();

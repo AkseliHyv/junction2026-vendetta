@@ -2,6 +2,7 @@
 (function () {
   const U = NM.util, T = NM.time, D = NM.data;
   const SOURCE_LABEL = { traffic: 'Traffic', construction: 'Construction', voices: 'Voices', nature: 'Nature' };
+  const EMBED = new URLSearchParams(location.search).get('embed') === 'game' && window.parent !== window;
 
   let selected = null; // the station shown in the sheet: { id, lon, lat }
   let lastRefresh = 0;
@@ -130,6 +131,7 @@
     });
     NM.map.select(hit);
     if (!opts.keepView) NM.map.reveal(hit, sheetH);
+    if (EMBED && !opts.keepView) window.parent.postMessage({ type: 'nm:select', id: st.id, lat: st.lat, lon: st.lon }, location.origin);
   }
 
   function stationDetails(s) {
@@ -149,5 +151,28 @@
 
   function onPick(st) {
     openStation({ id: st.id, lon: st.lon, lat: st.lat });
+  }
+
+  // ---- Inside the game's phone (game/index.html opens this page with ?embed=game) ----
+  if (EMBED) {
+    const post = (m) => window.parent.postMessage(m, location.origin);
+    window.addEventListener('message', (ev) => {
+      if (ev.origin !== location.origin || !ev.data || typeof ev.data !== 'object') return;
+      const m = ev.data;
+      if (m.type === 'nm:user' && Number.isFinite(m.lat)) NM.map.setUser({ lat: m.lat, lon: m.lon });
+      if (m.type === 'nm:focus' && Number.isFinite(m.lat)) {
+        NM.map.noAutoFit();
+        NM.map.reveal({ lat: m.lat, lon: m.lon }, 0, { force: true, zoom: m.zoom || 16 });
+      }
+    });
+    // Let the game's phone keys work while the map has focus.
+    window.addEventListener('keydown', (e) => {
+      const typing = e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName);
+      if (e.code === 'Tab' || e.code === 'Escape' || (e.code === 'KeyM' && !typing)) {
+        e.preventDefault();
+        post({ type: 'nm:key', code: e.code });
+      }
+    });
+    post({ type: 'nm:ready' });
   }
 })();

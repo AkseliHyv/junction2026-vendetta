@@ -1,5 +1,4 @@
-# Night-Noise Box
-
+# NoPE (Noise Pollution Exposure)
 A noise monitor built on the Arduino UNO Q. Each box listens through a USB
 microphone, measures how loud it is and uses an Edge Impulse model to guess
 what's making the noise (traffic, voices, construction...). Every few seconds
